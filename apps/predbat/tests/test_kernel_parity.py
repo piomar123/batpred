@@ -1095,7 +1095,14 @@ def run_net_settlement_edge_tests(my_predbat):
                 60,
                 0,
                 "flat",
-                {"num_cars": 1, "car_energy_reported_load": False, "car_charging_slots": [[{"start": 0, "end": 300, "kwh": 15.0, "average": 0, "octopus": False}], [], [], []], "car_charging_soc": [0, 0, 0, 0], "car_charging_limit": [100, 100, 100, 100], "soc_kw": 50.0},
+                {
+                    "num_cars": 1,
+                    "car_energy_reported_load": False,
+                    "car_charging_slots": [[{"start": 0, "end": 300, "kwh": 15.0, "average": 0, "octopus": False}], [], [], []],
+                    "car_charging_soc": [0, 0, 0, 0],
+                    "car_charging_limit": [100, 100, 100, 100],
+                    "soc_kw": 50.0,
+                },
                 [],
                 [],
                 [],
@@ -1107,7 +1114,15 @@ def run_net_settlement_edge_tests(my_predbat):
                 60,
                 25,
                 "flat",
-                {"num_cars": 1, "car_energy_reported_load": True, "car_charging_slots": [[{"start": 60, "end": 240, "kwh": 21.0, "average": 30, "octopus": True}], [], [], []], "car_charging_soc": [10, 0, 0, 0], "car_charging_limit": [50, 100, 100, 100], "car_charging_loss": 0.9, "soc_kw": 30.0},
+                {
+                    "num_cars": 1,
+                    "car_energy_reported_load": True,
+                    "car_charging_slots": [[{"start": 60, "end": 240, "kwh": 21.0, "average": 30, "octopus": True}], [], [], []],
+                    "car_charging_soc": [10, 0, 0, 0],
+                    "car_charging_limit": [50, 100, 100, 100],
+                    "car_charging_loss": 0.9,
+                    "soc_kw": 30.0,
+                },
                 [],
                 [],
                 [],
@@ -1239,7 +1254,20 @@ def run_random_sweep_tests(my_predbat, count=150):
             my_predbat.net_settlement_seed = (my_predbat.minutes_now // net_window, seed_import, seed_import_cost, seed_export, seed_export_credit, net_settlement_value(seed_import, seed_import_cost, seed_export, seed_export_credit))
         net_count += 1
         failed |= dual_run(
-            "random_{}_net{}_s{}".format(seed, net_window, net_scenario), my_predbat, pv_step, pv10_step, load_step, load10_step, charge_limit, charge_window, export_window, export_limits, net_scenario, end_record, pv90_step=pv90_step, load90_step=load90_step
+            "random_{}_net{}_s{}".format(seed, net_window, net_scenario),
+            my_predbat,
+            pv_step,
+            pv10_step,
+            load_step,
+            load10_step,
+            charge_limit,
+            charge_window,
+            export_window,
+            export_limits,
+            net_scenario,
+            end_record,
+            pv90_step=pv90_step,
+            load90_step=load90_step,
         )
         my_predbat.metric_net_settlement_window_minutes = 0
         my_predbat.net_settlement_seed = None
