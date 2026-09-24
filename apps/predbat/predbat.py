@@ -680,6 +680,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         # Last raw metric_net_settlement_window_minutes seen by fetch_config_options, so it only logs on change
         self.net_settlement_window_arg = None
         self.net_settlement_seed = None
+        # Per-window surplus of the last published plan (Plan.run_prediction, save="best")
+        self.net_settlement_surplus = None
 
         for root in CONFIG_ROOTS:
             if os.path.exists(root):

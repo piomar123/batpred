@@ -51,14 +51,17 @@
 // three arrays. Same three fields, but one buffer and one stride, with the (99.0, 100.0) gap gone
 // because mode is explicit (GH#4914).
 // ABI 8: PkContext gained metric_net_settlement_window and the net_seed_* fields at the end.
-#define PK_ABI_VERSION 8
+// ABI 9: PkContext gained the iboost_gate_rate array pointer at the end.
+#define PK_ABI_VERSION 9
 // Parity 14: the explicit (mode, target, power) fields replace the packed double throughout the hot
 // loop (see the ABI 6 note); the floor a target exports to now reads the target field, matching
 // prediction.py.
 // Parity 15: optional net settlement of import/export within wall-clock windows of
 // metric_net_settlement_window minutes (0 = off, unchanged behaviour), mirroring prediction.py. The
 // current window starts from the already-metered net_seed_* totals handed over by today_cost.
-#define PK_PARITY_REVISION 15
+// Parity 16: with net settlement on, the iBoost rate gates read iboost_gate_rate where it is known
+// (not NaN) in place of the step's import and export rates, mirroring prediction.py.
+#define PK_PARITY_REVISION 16
 #define PK_MAX_CARS 8
 #define PK_RUN_EVERY 5 // const.py RUN_EVERY
 #define PK_EXPORT_MODE_TARGET 0 // const.py EXPORT_MODE_TARGET
@@ -278,6 +281,7 @@ struct PkContext {
     double net_seed_export_kwh;
     double net_seed_export_credit;
     double net_seed_applied;              // settled value already inside cost_today_sofar
+    const double *iboost_gate_rate;       // per step: net settlement window's effective rate for the iBoost gates, NaN = unknown
 };
 
 // Per-scenario inputs; field order MUST match the ctypes Structure in prediction_kernel.py.
@@ -416,6 +420,7 @@ struct ContextStore {
     std::vector<double> charge_curve, discharge_curve;
     std::vector<double> carbon, gas_rate, iboost_plan_load;
     std::vector<double> car_load_flat, car_rate_flat;
+    std::vector<double> iboost_gate_rate;
     std::vector<double> soc_percent_threshold; // see build_soc_percent_thresholds
     PkContext ctx;
 };
@@ -621,6 +626,7 @@ int64_t pk_context_create(const PkContext *in)
         store->car_load_flat.assign(in->car_load_flat, in->car_load_flat + n_car);
         store->car_rate_flat.assign(in->car_rate_flat, in->car_rate_flat + n_car);
     }
+    store->iboost_gate_rate.assign(in->iboost_gate_rate, in->iboost_gate_rate + n);
     store->ctx = *in;
     store->ctx.rate_import = store->rate_import.data();
     store->ctx.rate_export = store->rate_export.data();
@@ -642,6 +648,7 @@ int64_t pk_context_create(const PkContext *in)
     store->ctx.iboost_plan_load = store->iboost_plan_load.data();
     store->ctx.car_load_flat = store->car_load_flat.data();
     store->ctx.car_rate_flat = store->car_rate_flat.data();
+    store->ctx.iboost_gate_rate = store->iboost_gate_rate.data();
 
     std::lock_guard<std::mutex> lock(g_context_mutex);
     int64_t handle = g_next_handle++;
@@ -936,22 +943,30 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
         bool iboost_rate_okay = true;
         double iboost_amount = 0;
         if (c->iboost_enable) {
+            // Under net settlement, a window the last plan saw netting one way prices load and export alike (prediction.py)
+            double gate_import_rate = import_rate;
+            double gate_export_rate = export_rate;
+            if (net_window > 0 && !std::isnan(c->iboost_gate_rate[k])) {
+                gate_import_rate = c->iboost_gate_rate[k];
+                gate_export_rate = c->iboost_gate_rate[k];
+            }
+
             // Boost on energy rates
-            if (import_rate > c->iboost_rate_threshold) {
+            if (gate_import_rate > c->iboost_rate_threshold) {
                 iboost_rate_okay = false;
             }
-            if (export_rate > c->iboost_rate_threshold_export) {
+            if (gate_export_rate > c->iboost_rate_threshold_export) {
                 iboost_rate_okay = false;
             }
 
             // Boost on gas vs import/export rate
             if (c->iboost_gas && c->has_rate_gas) {
-                if (import_rate > c->gas_rate[k]) {
+                if (gate_import_rate > c->gas_rate[k]) {
                     iboost_rate_okay = false;
                 }
             }
             if (c->iboost_gas_export && c->has_rate_gas) {
-                if (export_rate > c->gas_rate[k]) {
+                if (gate_export_rate > c->gas_rate[k]) {
                     iboost_rate_okay = false;
                 }
             }

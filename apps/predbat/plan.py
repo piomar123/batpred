@@ -37,6 +37,8 @@ from const import (
 )
 
 from utils import (
+    net_settlement_window_info,
+    net_settlement_blended_prices,
     calc_percent_limit,
     clone_windows,
     dp0,
@@ -4583,6 +4585,9 @@ class Plan:
                 self.predict_metric_best = pred.predict_metric_best
                 self.predict_carbon_best = pred.predict_carbon_best
                 self.predict_clipped_best = pred.predict_clipped_best
+            if save == "best":
+                # Per-window surplus of the published plan, for the next cycle's iBoost and car decisions
+                self.net_settlement_surplus = pred.net_settlement_surplus_best
 
             if save:
                 self.log(
@@ -5277,6 +5282,7 @@ class Plan:
         self.log("Create iBoost smart plan, max {} kWh, power {} kW, min length {} minutes".format(iboost_max, iboost_power, iboost_min_length))
 
         low_rates = []
+        net_info = self.net_settlement_window_info_now()
         start_minute = int(self.minutes_now / self.plan_interval_minutes) * self.plan_interval_minutes
         for minute in range(start_minute, start_minute + self.forecast_minutes, self.plan_interval_minutes):
             import_rate = 0
@@ -5289,7 +5295,13 @@ class Plan:
                 slot_length += self.plan_interval_minutes
                 slot_count += 1
             if slot_count:
-                low_rates.append({"start": minute, "end": minute + slot_length, "average": import_rate / slot_count, "export": export_rate / slot_count})
+                average_import = import_rate / slot_count
+                average_export = export_rate / slot_count
+                if net_info:
+                    # Net settlement: the boost first soaks up the window's surplus (export rate), then imports
+                    kwh = iboost_power * slot_length / 60.0
+                    average_import, average_export = net_settlement_blended_prices(net_info, self.metric_net_settlement_window_minutes, minute, minute + slot_length, kwh, self.rate_import, self.rate_export, self.rate_min, 0)
+                low_rates.append({"start": minute, "end": minute + slot_length, "average": average_import, "export": average_export})
 
         # Get prices
         if self.iboost_smart:
@@ -5384,8 +5396,14 @@ class Plan:
         car_soc = self.car_charging_soc[car_n]
         max_price = self.car_charging_plan_max_price[car_n]
 
+        # Net settlement: price each slot by what charging there really costs (see net_settlement_car_windows)
+        net_info = self.net_settlement_window_info_now()
+        if net_info:
+            low_rates = self.net_settlement_car_windows(car_n, low_rates, net_info)
+
         if self.car_charging_plan_smart[car_n]:
-            price_sorted = self.sort_window_by_price(low_rates, reverse_time=True)
+            # Sort on "price" where net settlement set one, "average" stays the import rate for the car premium
+            price_sorted = self.sort_window_by_price([dict(window, average=window.get("price", window["average"])) for window in low_rates], reverse_time=True)
             price_sorted.reverse()
         else:
             price_sorted = [n for n in range(len(low_rates))]
@@ -5429,7 +5447,7 @@ class Plan:
 
             start = max(window["start"], self.minutes_now)
             end = min(window["end"], ready_minutes)
-            price = window["average"]
+            price = window.get("price", window["average"])
 
             length = 0
             kwh = 0
@@ -5479,6 +5497,38 @@ class Plan:
         # Return sorted back in time order
         plan = self.sort_window_by_time(plan)
         return plan
+
+    def net_settlement_window_info_now(self):
+        """Per-window surplus and rates from the last published plan when net settlement is on, else {}"""
+        window = getattr(self, "metric_net_settlement_window_minutes", 0)
+        if window <= 0:
+            return {}
+        return net_settlement_window_info(getattr(self, "net_settlement_surplus", None), window, self.midnight_utc, self.rate_import, self.rate_export)
+
+    def net_settlement_car_windows(self, car_n, low_rates, net_info):
+        """Car charging candidates under net settlement, one per plan interval slot, in time order.
+
+        Charging in a window that nets to export first uses up that surplus, which only costs the export
+        rate, so such a slot can be cheap even when its import rate is not low. Each slot gets a "price"
+        blended from the surplus it can use (net_settlement_blended_prices) at the car's charge rate, and
+        is a candidate when it lies in one of low_rates or its price is at or below the low rate
+        threshold. "average" stays the slot's import rate, which the car premium is measured against.
+        """
+        interval = self.plan_interval_minutes
+        window = self.metric_net_settlement_window_minutes
+        kwh = self.car_charging_rate[car_n] * interval / 60.0
+        low_minutes = set()
+        for low in low_rates:
+            low_minutes.update(range(low["start"], low["end"], PREDICT_STEP))
+        candidates = []
+        start_minute = int(self.minutes_now / interval) * interval
+        for start in range(start_minute, self.minutes_now + self.forecast_minutes, interval):
+            end = start + interval
+            price, _ = net_settlement_blended_prices(net_info, window, start, end, kwh, self.rate_import, self.rate_export, self.rate_min, 0)
+            if start in low_minutes or price <= self.rate_import_cost_threshold:
+                import_rates = [self.rate_import.get(minute, self.rate_min) for minute in range(start, end, PREDICT_STEP)]
+                candidates.append({"start": start, "end": end, "average": sum(import_rates) / len(import_rates), "price": price})
+        return candidates
 
     def car_charge_slot_kwh(self, minute_start, minute_end):
         """

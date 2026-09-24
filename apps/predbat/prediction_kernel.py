@@ -21,6 +21,7 @@ rejected at load time rather than producing divergent results.
 """
 
 import array
+import math
 import ctypes
 import struct
 import os
@@ -32,8 +33,8 @@ from const import PREDICT_STEP, PREDBAT_MAX_CARS, EXPORT_MODE_TARGET, FULL_EXPOR
 from utils import net_settlement_seed_from, get_curve_value, find_battery_temperature_cap, in_car_slot, in_iboost_slot, export_limit_from_stored
 
 # Expected ABI/parity revisions of the shared library (see prediction_kernel.cpp)
-KERNEL_ABI_VERSION = 8
-KERNEL_PARITY_REVISION = 15
+KERNEL_ABI_VERSION = 9
+KERNEL_PARITY_REVISION = 16
 
 # Maximum number of cars supported by the kernel (PK_MAX_CARS in prediction_kernel.cpp)
 KERNEL_MAX_CARS = PREDBAT_MAX_CARS
@@ -144,6 +145,7 @@ class PkContext(ctypes.Structure):
         ("net_seed_export_kwh", ctypes.c_double),
         ("net_seed_export_credit", ctypes.c_double),
         ("net_seed_applied", ctypes.c_double),
+        ("iboost_gate_rate", ctypes.POINTER(ctypes.c_double)),
     ]
 
 
@@ -768,6 +770,13 @@ def create_kernel_context(pred, static_cache=None):
         ctx.iboost_plan_load = double_array(iboost_plan_load)
         ctx.car_load_flat = double_array(car_load_flat)
         ctx.car_rate_flat = double_array(car_rate_flat)
+        # iBoost gate rate per step under net settlement (prediction.py net_gate_rates), NaN where unknown
+        net_window = int(getattr(pred, "metric_net_settlement_window_minutes", 0) or 0)
+        gate_rates = getattr(pred, "net_iboost_gate_rates", None) or {}
+        if net_window > 0 and gate_rates:
+            ctx.iboost_gate_rate = double_array([gate_rates.get((minutes_now + k * PREDICT_STEP) // net_window, math.nan) for k in range(n_steps)])
+        else:
+            ctx.iboost_gate_rate = double_array([math.nan] * n_steps)
 
         ctx.soc_kw = pred.soc_kw
         ctx.soc_max = pred.soc_max

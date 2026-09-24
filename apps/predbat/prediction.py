@@ -35,6 +35,9 @@ from utils import (
     pack_export_limit,
     net_settlement_value,
     net_settlement_seed_from,
+    net_settlement_surplus_record,
+    net_settlement_window_info,
+    net_settlement_effective_rate,
 )
 from prediction_batch import PredictionBatch, prediction_cache_key
 from prediction_kernel import create_kernel_context, kernel_supported, run_prediction_kernel
@@ -116,6 +119,12 @@ class Prediction(PredictionBatch):
             self.metric_net_settlement_window_minutes = getattr(base, "metric_net_settlement_window_minutes", 0)
             # Import/export already metered in the current window, from today_cost() in output.py
             self.net_settlement_seed = net_settlement_seed_from(getattr(base, "net_settlement_seed", None))
+            # iBoost rate gates under net settlement: window id -> the rate one more kWh of load is worth in
+            # that window, from the last published plan (see net_settlement_window_info). Empty = plain rates.
+            self.net_iboost_gate_rates = {}
+            if self.metric_net_settlement_window_minutes > 0 and base.iboost_enable:
+                net_info = net_settlement_window_info(getattr(base, "net_settlement_surplus", None), self.metric_net_settlement_window_minutes, base.midnight_utc, base.rate_import, base.rate_export)
+                self.net_iboost_gate_rates = {window_id: net_settlement_effective_rate(entry) for window_id, entry in net_info.items()}
             self.set_charge_freeze = base.set_charge_freeze
             self.set_reserve_enable = base.set_reserve_enable
             self.set_export_freeze = base.set_export_freeze
@@ -736,6 +745,17 @@ class Prediction(PredictionBatch):
             net_export_kwh = net_seed.export_kwh
             net_export_credit = net_seed.export_credit
             net_applied = net_seed.applied
+        # iBoost rate gates use the window's effective rate where the last plan says which way it nets
+        net_gate_rates = self.net_iboost_gate_rates if net_window > 0 else {}
+        # The published plan records how far each window nets to export without the controllable loads
+        # (iBoost and car charging), for the next cycle's iBoost and car decisions. Metered flows count.
+        net_surplus = None
+        if net_window > 0 and save == "best":
+            net_surplus = {}
+            if net_window_id >= 0:
+                net_surplus[net_window_id] = net_export_kwh - net_import_kwh
+        net_step = 0.0
+        net_controllable = 0.0
 
         # Simulate each forward minute
         minute = 0
@@ -893,28 +913,41 @@ class Prediction(PredictionBatch):
                         if (car_load_scale > 0) and (not self.car_charging_from_battery) and set_charge_window:
                             discharge_rate_now = battery_rate_min  # 0
 
+            # Car energy this step, before the import accounting caps car_amount_premium
+            if net_surplus is not None:
+                net_controllable = car_amount_premium + car_load_energy_bypass
+
             # Iboost
             iboost_rate_okay = True
             iboost_amount = 0
 
             # IBoost energy rate control
             if self.iboost_enable:
+                # Under net settlement, a window the last plan saw netting one way prices load and export alike
+                gate_import_rate = import_rate
+                gate_export_rate = export_rate
+                if net_gate_rates:
+                    gate_rate = net_gate_rates.get(minute_absolute // net_window)
+                    if gate_rate is not None:
+                        gate_import_rate = gate_rate
+                        gate_export_rate = gate_rate
+
                 # Boost on energy rates
-                if import_rate > self.iboost_rate_threshold:
+                if gate_import_rate > self.iboost_rate_threshold:
                     iboost_rate_okay = False
-                if export_rate > self.iboost_rate_threshold_export:
+                if gate_export_rate > self.iboost_rate_threshold_export:
                     iboost_rate_okay = False
 
                 # Boost on gas vs import rate
                 if self.iboost_gas and self.rate_gas:
                     gas_rate = self.rate_gas.get(minute_absolute, 99) * self.iboost_gas_scale
-                    if import_rate > gas_rate:
+                    if gate_import_rate > gas_rate:
                         iboost_rate_okay = False
 
                 # Boost on gas vs export rate
                 if self.iboost_gas_export and self.rate_gas:
                     gas_rate = self.rate_gas.get(minute_absolute, 99) * self.iboost_gas_scale
-                    if export_rate > gas_rate:
+                    if gate_export_rate > gas_rate:
                         iboost_rate_okay = False
 
                 # IBoost solar diverter on load, don't do on discharge
@@ -1386,6 +1419,7 @@ class Prediction(PredictionBatch):
                 car_amount_premium = min(diff, car_amount_premium)
                 if net_window > 0:
                     # Grid import is settled at the end of the step below, the car premium is not netted
+                    net_step = -diff
                     net_import_kwh += diff
                     net_import_cost += import_rate * diff
                     metric += car_rate_premium * car_amount_premium
@@ -1402,6 +1436,7 @@ class Prediction(PredictionBatch):
                 if net_window > 0:
                     # Only the export that reaches the meter (see the car bypass case below) is netted
                     export_valued = max(0.0, energy - car_load_energy_bypass) if not car_energy_reported_load else energy
+                    net_step = export_valued
                     net_export_kwh += export_valued
                     net_export_credit += export_rate * export_valued
                 elif not car_energy_reported_load:
@@ -1425,6 +1460,8 @@ class Prediction(PredictionBatch):
                 settled = net_settlement_value(net_import_kwh, net_import_cost, net_export_kwh, net_export_credit)
                 metric += settled - net_applied
                 net_applied = settled
+                if net_surplus is not None:
+                    net_surplus[net_window_id] = net_surplus.get(net_window_id, 0.0) + net_step + net_controllable + iboost_amount
 
             # Record final soc & metric
             if record:
@@ -1493,6 +1530,7 @@ class Prediction(PredictionBatch):
             self.predict_car_soc_time = predict_car_soc_time
             self.final_soc = round(final_soc, 4)
             self.final_metric = round(final_metric, 4)
+            self.net_settlement_surplus_best = net_settlement_surplus_record(net_surplus, net_window, self.midnight_utc) if net_surplus is not None else None
             self.final_metric_keep = round(final_metric_keep, 4)
             self.final_import_kwh = round(final_import_kwh, 4)
             self.final_import_kwh_battery = round(final_import_kwh_battery, 4)

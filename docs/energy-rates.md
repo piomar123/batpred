@@ -618,12 +618,32 @@ Things to be aware of:
   later slot's cost in the plan shows the import it cancelled, priced at the import rate.
 - The setting applies to every tariff Predbat prices, including the tariffs in [Energy Comparison](compare.md), even ones that
   don't net in reality.
-- Only the plan's cost is netted. Decisions that Predbat makes by comparing each slot's own rate against a threshold still use
-  the plain per-slot rates. That covers when the iBoost diverter runs (its rate thresholds, gas comparisons and smart iBoost
-  slots) and which slots car charging picks. For example, in an hour that is mostly import, solar diverted to iBoost is really
-  worth the import rate, because it would otherwise have cancelled import, but iBoost still judges it at the export rate.
 - Netting doesn't always lower the cost. If your export rate is higher than your import rate in the same window, netting takes
   away the profit of importing and exporting in that window, and the plan changes to match.
+
+### iBoost and car charging with net settlement
+
+The iBoost diverter and car charging decide when to run by comparing rates, rather than through the optimiser. With net settlement
+the rate that matters is what one more kWh of load costs in that window, and because import and export kWh cancel each other out,
+that depends on which way the window nets:
+
+- In a window that nets to import, extra load is extra import, and solar diverted to it would otherwise have cancelled import, so
+  it is worth the **import** rate.
+- In a window that nets to export, extra load only reduces the export, so it costs the **export** rate, up to the amount the
+  window has spare. Anything beyond that becomes import again.
+
+Predbat takes the direction and the spare export of each window from the last published plan, leaving out the iBoost and car
+charging loads themselves so that their own decisions don't flip the result from one run to the next. It then:
+
+- runs the iBoost rate thresholds and gas comparisons against the window's rate (the export rate if the window nets to export,
+  otherwise the import rate);
+- prices smart iBoost slots and car charging slots by blending the spare export (at the export rate) with the rest (at the import
+  rate), so a sunny hour that nets to export can become the cheapest place to charge the car or heat water, even if its import
+  rate is not low. Car slots priced at or below the low rate threshold become candidates alongside the usual low rate slots, and
+  **car_charging_plan_max_price** applies to the blended price.
+
+Windows the last plan didn't cover, and the first run after Predbat starts, use the plain per-slot rates as before. iBoost and car
+charging each see the same spare export, so if both run in the same window they can plan to use it twice.
 
 ## Rate offsets
 

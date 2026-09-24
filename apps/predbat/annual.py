@@ -750,6 +750,7 @@ def reset_sample_state(predbat):
 
     predbat.cost_today_sofar = 0
     predbat.net_settlement_seed = None
+    predbat.net_settlement_surplus = None
     predbat.carbon_today_sofar = 0
     predbat.iboost_today = 0
     predbat.import_today_now = 0

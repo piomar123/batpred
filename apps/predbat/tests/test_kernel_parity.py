@@ -36,7 +36,7 @@ import prediction_kernel
 from const import PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10, PV_SCENARIO_PV90, MINUTE_WATT
 from prediction import Prediction
 from prediction_kernel import create_kernel_context, run_prediction_kernel, load_kernel
-from utils import remove_intersecting_windows, unpack_export_limit, net_settlement_value, NetSettlementSeed
+from utils import remove_intersecting_windows, unpack_export_limit, net_settlement_value, NetSettlementSeed, net_settlement_surplus_record
 from tests.test_infra import reset_inverter, reset_rates, FIXTURE_MINUTES_NOW
 from tests.test_model import run_model_tests
 
@@ -143,6 +143,7 @@ SCENARIO_STATE_ATTRS = [
     "end_record",
     "metric_net_settlement_window_minutes",
     "net_settlement_seed",
+    "net_settlement_surplus",
 ]
 
 
@@ -797,6 +798,7 @@ def reset_net_settlement_base(my_predbat, minutes_now, import_rate=10.0, export_
     my_predbat.rate_gas = {}
     my_predbat.metric_net_settlement_window_minutes = 0
     my_predbat.net_settlement_seed = None
+    my_predbat.net_settlement_surplus = None
 
 
 def make_mixed_step_data(my_predbat, pv_kw, load_kw, pv_minutes=20, period=60):
@@ -1255,6 +1257,13 @@ def run_random_sweep_tests(my_predbat, count=150):
             seed_import_cost = round(seed_import * rng_net.uniform(-5, 45), 4)
             seed_export_credit = round(seed_export * rng_net.uniform(-5, 30), 4)
             my_predbat.net_settlement_seed = (my_predbat.minutes_now // net_window, seed_import, seed_import_cost, seed_export, seed_export_credit, net_settlement_value(seed_import, seed_import_cost, seed_export, seed_export_credit))
+        # Window-aware iBoost gates: a random last-plan surplus per window, some windows left unknown
+        my_predbat.net_settlement_surplus = None
+        if my_predbat.iboost_enable and rng_net.random() < 0.7:
+            first_window = my_predbat.minutes_now // net_window
+            last_window = (my_predbat.minutes_now + my_predbat.forecast_minutes) // net_window
+            surplus = {window_id: round(rng_net.uniform(-3, 3), 3) for window_id in range(first_window, last_window + 1) if rng_net.random() < 0.8}
+            my_predbat.net_settlement_surplus = net_settlement_surplus_record(surplus, net_window, my_predbat.midnight_utc)
         net_count += 1
         failed |= dual_run(
             "random_{}_net{}_s{}".format(seed, net_window, net_scenario),
@@ -1274,6 +1283,7 @@ def run_random_sweep_tests(my_predbat, count=150):
         )
         my_predbat.metric_net_settlement_window_minutes = 0
         my_predbat.net_settlement_seed = None
+        my_predbat.net_settlement_surplus = None
         if failed:
             print("Random sweep failed at seed {} with net settlement window {}".format(seed, net_window))
             break

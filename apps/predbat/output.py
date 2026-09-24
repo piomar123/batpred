@@ -3346,6 +3346,7 @@ class Output:
         forecast_minutes = self.forecast_minutes
         cost_today_sofar = self.cost_today_sofar
         net_settlement_seed = self.net_settlement_seed
+        net_settlement_surplus = self.net_settlement_surplus
         import_today_now = self.import_today_now
         export_today_now = self.export_today_now
         pv_today_now = self.pv_today_now
@@ -3369,6 +3370,8 @@ class Output:
         self.minutes_now = 0
         self.cost_today_sofar = 0
         self.net_settlement_seed = None
+        # Today's plan says nothing about how yesterday's windows netted
+        self.net_settlement_surplus = None
         self.import_today_now = 0
         self.export_today_now = 0
         self.carbon_today_sofar = 0
@@ -3739,6 +3742,7 @@ class Output:
         self.forecast_minutes = forecast_minutes
         self.cost_today_sofar = cost_today_sofar
         self.net_settlement_seed = net_settlement_seed
+        self.net_settlement_surplus = net_settlement_surplus
         self.import_today_now = import_today_now
         self.export_today_now = export_today_now
         self.carbon_today_sofar = carbon_today_sofar

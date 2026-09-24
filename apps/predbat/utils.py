@@ -3068,3 +3068,82 @@ def net_settlement_window_from_arg(value):
     if window < 0 or not window.is_integer() or int(window) % PREDICT_STEP or (24 * 60) % int(window):
         return None
     return int(window)
+
+
+def net_settlement_surplus_record(surplus, window, midnight_utc):
+    """Package the per-window surplus kWh recorded by a best-plan prediction for use by the next cycle.
+
+    surplus maps window id (minutes since midnight_utc // window) to the kWh the window nets to export
+    with the controllable loads (iBoost and car charging) taken out - negative when it nets to import.
+    midnight_utc is stored as whole epoch minutes so the record survives a debug dump and can be
+    re-keyed after midnight by net_settlement_window_info.
+    """
+    return {"window": window, "midnight": int(midnight_utc.timestamp() // 60), "surplus": dict(surplus)}
+
+
+def net_settlement_window_info(record, window, midnight_utc, rate_import, rate_export):
+    """Return {window id: (surplus_kwh, import_rate, export_rate)} for the current day from a surplus record.
+
+    The window ids are shifted onto today's midnight, the rates are the time-averaged import and export
+    rates across each window. Windows without rates, a record for a different window length, or no
+    record at all give an empty dict, which callers treat as "use the plain per-slot rates".
+    """
+    if not record or window <= 0 or record.get("window") != window:
+        return {}
+    shift = record.get("midnight", 0) - int(midnight_utc.timestamp() // 60)
+    if shift % window:
+        return {}
+    shift_ids = shift // window
+    info = {}
+    for window_id, surplus in record.get("surplus", {}).items():
+        new_id = int(window_id) + shift_ids
+        start = new_id * window
+        import_rates = [rate_import[minute] for minute in range(start, start + window) if minute in rate_import]
+        export_rates = [rate_export[minute] for minute in range(start, start + window) if minute in rate_export]
+        if not import_rates or not export_rates:
+            continue
+        info[new_id] = (surplus, sum(import_rates) / len(import_rates), sum(export_rates) / len(export_rates))
+    return info
+
+
+def net_settlement_effective_rate(entry):
+    """What one more kWh of load (or one less kWh of export) is worth in a window from net_settlement_window_info.
+
+    Within a net settlement window import and export cancel out, so a window that nets to export turns
+    extra load into lost export (export rate) and one that nets to import turns it into extra import
+    (import rate) - the same rate whichever way the kWh flows.
+    """
+    surplus, import_rate, export_rate = entry
+    return export_rate if surplus > 0 else import_rate
+
+
+def net_settlement_blended_prices(info, window, start, end, kwh, rate_import, rate_export, import_default=0, export_default=0):
+    """Average (import-side, export-side) price per kWh of kwh of load spread evenly over [start, end).
+
+    In a known window the load first uses up that window's surplus (its share of it, by time), which
+    costs the export rate, and any more is net import at the import rate; both sides get that blended
+    price. Minutes outside a known window keep the plain import and export rates.
+    """
+    steps = range(start, end, PREDICT_STEP)
+    count = len(steps)
+    if not count:
+        return rate_import.get(start, import_default), rate_export.get(start, export_default)
+    kwh_step = max(kwh, 0) / count
+    import_total = 0.0
+    export_total = 0.0
+    for minute in steps:
+        entry = info.get(minute // window) if window > 0 else None
+        if entry is None:
+            import_total += rate_import.get(minute, import_default)
+            export_total += rate_export.get(minute, export_default)
+            continue
+        surplus, import_rate, export_rate = entry
+        if kwh_step <= 0:
+            price = net_settlement_effective_rate(entry)
+        else:
+            surplus_step = max(surplus, 0) * PREDICT_STEP / window
+            cheap = min(kwh_step, surplus_step)
+            price = (cheap * export_rate + (kwh_step - cheap) * import_rate) / kwh_step
+        import_total += price
+        export_total += price
+    return import_total / count, export_total / count
