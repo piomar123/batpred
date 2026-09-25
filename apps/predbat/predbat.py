@@ -680,6 +680,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         # Last raw metric_net_settlement_window_minutes seen by fetch_config_options, so it only logs on change
         self.net_settlement_window_arg = None
         self.net_settlement_seed = None
+        # (window id, metered net import kWh) at the last recompute net_settlement_replan_needed asked for
+        self.net_settlement_replan_last = None
 
         for root in CONFIG_ROOTS:
             if os.path.exists(root):
@@ -1076,6 +1078,11 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         # Check if any sensor changes require a replan
         if sensor_force_replan:
             self.log("Sensor changes require a replan, will recompute the plan")
+            recompute = True
+
+        # Net settlement: import metered in the current window can be cancelled by exporting before it ends
+        if self.net_settlement_replan_needed():
+            self.log("Net settlement: net import metered in the current window, will recompute the plan to consider exporting against it")
             recompute = True
 
         # Open the control-ledger cycle BEFORE the first inverter read. fetch_inverter_data()

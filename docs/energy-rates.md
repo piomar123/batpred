@@ -622,6 +622,13 @@ Things to be aware of:
   the plain per-slot rates. That covers when the iBoost diverter runs (its rate thresholds, gas comparisons and smart iBoost
   slots) and which slots car charging picks. For example, in an hour that is mostly import, solar diverted to iBoost is really
   worth the import rate, because it would otherwise have cancelled import, but iBoost still judges it at the export rate.
+- If the current window has already imported more than it exported (for example a load spike beyond what the battery can
+  cover), exporting from the battery before the window ends cancels that import, so it is worth the import rate, however low the
+  export rate is. Predbat then offers the optimiser the rest of the window as export slots, even where the export rate is below
+  the export threshold (**input_number.predbat_rate_high_threshold**), and exports if the plan says it's worth it. When the net
+  import grows by 0.1 kWh or more it recomputes the plan straight away rather than waiting for the next scheduled recompute, so it
+  can react before the window ends. Only import that has already happened counts, so without it the export threshold works as
+  before.
 - Netting doesn't always lower the cost. If your export rate is higher than your import rate in the same window, netting takes
   away the profit of importing and exporting in that window, and the plan changes to match.
 

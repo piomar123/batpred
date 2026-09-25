@@ -23,6 +23,7 @@ from multiprocessing import cpu_count
 from const import (
     CLOUD_FACTOR_PV10,
     CLOUD_WINDOW_MINUTES,
+    NET_SETTLEMENT_REPLAN_KWH,
     PREDICT_STEP,
     PV_SCENARIO_NOMINAL,
     PV_SCENARIO_PV10,
@@ -43,6 +44,7 @@ from utils import (
     dp1,
     dp2,
     dp3,
+    net_settlement_seed_from,
     dp4,
     remove_intersecting_windows,
     in_car_slot,
@@ -1420,6 +1422,12 @@ class Plan:
             # Calculate best export windows
             if self.calculate_best_export and self.set_export_window:
                 self.export_window_best = clone_windows(self.high_export_rates)
+                # Net settlement: let the optimiser export against import already metered in this window
+                net_export_windows = self.net_settlement_export_windows(self.export_window_best)
+                if net_export_windows:
+                    net_seed = net_settlement_seed_from(self.net_settlement_seed)
+                    self.log("Net settlement: {} kWh net import metered in the current window, adding export window(s) {}".format(dp2(net_seed.import_kwh - net_seed.export_kwh), net_export_windows))
+                    self.export_window_best = sorted(self.export_window_best + net_export_windows, key=lambda window: window["start"])
             else:
                 self.export_window_best = clone_windows(self.export_window)
 
@@ -2791,6 +2799,65 @@ class Plan:
             window_sort.sort()
 
         return window_sort, window_links
+
+    def net_settlement_export_windows(self, export_windows):
+        """Extra export windows for the rest of the current net settlement window, when it has metered net import.
+
+        Export windows normally come from high_export_rates, which leaves out slots whose export rate is
+        below rate_export_cost_threshold. Under net settlement, though, export in a window that has
+        already imported cancels that import, so it is worth the import rate - exporting from the battery
+        can pay for an unplanned import even when the export rate is very low. This offers the optimiser
+        the rest of the current window, split on plan interval boundaries, wherever no export window
+        already covers it; the netted metric then decides whether and how much to export. The windows'
+        average is the import rate, which is what exporting against the import is worth.
+
+        Only metered import counts (net_settlement_seed, from today_cost), so without an import to cancel
+        nothing is added and rate_export_cost_threshold is respected as before. Returns the new windows.
+        """
+        window = self.metric_net_settlement_window_minutes
+        if window <= 0:
+            return []
+        seed = net_settlement_seed_from(self.net_settlement_seed)
+        window_id = self.minutes_now // window
+        if not seed or seed.window != window_id or seed.import_kwh <= seed.export_kwh:
+            return []
+        interval = self.plan_interval_minutes
+        window_end = (window_id + 1) * window
+        start = max(window_id * window, (self.minutes_now // interval) * interval)
+        candidates = []
+        while start < window_end:
+            end = min((start // interval + 1) * interval, window_end)
+            if not any(existing["start"] < end and existing["end"] > start for existing in export_windows):
+                import_rates = [self.rate_import.get(minute, 0) for minute in range(start, end, PREDICT_STEP)]
+                candidates.append({"start": start, "end": end, "average": dp2(sum(import_rates) / len(import_rates))})
+            start = end
+        return candidates
+
+    def net_settlement_replan_needed(self):
+        """True when the plan should be recomputed now to consider exporting against import metered in this window.
+
+        The export windows from net_settlement_export_windows are only added when the plan is recomputed
+        (every calculate_plan_every minutes by default). To react within the window, this asks for a
+        recompute when the current window's metered net import has grown by NET_SETTLEMENT_REPLAN_KWH
+        since the last recompute it asked for, and the current plan has no export window covering the
+        rest of the window. Remembering the level it replanned at keeps it from replanning every cycle.
+        """
+        window = self.metric_net_settlement_window_minutes
+        if window <= 0 or not (self.calculate_best_export and self.set_export_window):
+            return False
+        seed = net_settlement_seed_from(self.net_settlement_seed)
+        if not seed or seed.window != self.minutes_now // window:
+            return False
+        net_import = seed.import_kwh - seed.export_kwh
+        if net_import < NET_SETTLEMENT_REPLAN_KWH:
+            return False
+        last = self.net_settlement_replan_last
+        if last and last[0] == seed.window and net_import < last[1] + NET_SETTLEMENT_REPLAN_KWH:
+            return False
+        if not self.net_settlement_export_windows(self.export_window_best):
+            return False
+        self.net_settlement_replan_last = (seed.window, net_import)
+        return True
 
     def sort_window_by_price(self, windows, reverse_time=False):
         """

@@ -140,3 +140,7 @@ PREDBAT_MODE_CONTROL_CHARGEDISCHARGE = 3
 # need the same answer to "which of these two states is the more significant one to show".
 CHARGE_STATE_PRECEDENCE = ["Charging", "Freeze charging", "Hold charging"]
 EXPORT_STATE_PRECEDENCE = ["Exporting", "Freeze exporting", "Hold exporting"]
+
+# Net settlement: metered net import (kWh) in the current window that makes Predbat recompute the plan early to consider
+# exporting against it, and the further growth that makes it do so again (Plan.net_settlement_replan_needed)
+NET_SETTLEMENT_REPLAN_KWH = 0.1
