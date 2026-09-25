@@ -1082,7 +1082,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
 
         # Net settlement: import metered in the current window can be cancelled by exporting before it ends
         if self.net_settlement_replan_needed():
-            self.log("Net settlement: net import metered in the current window, will recompute the plan to consider exporting against it")
+            self.log("Net settlement: import/export imbalance metered in the current window, will recompute the plan to act on it")
             recompute = True
 
         # Open the control-ledger cycle BEFORE the first inverter read. fetch_inverter_data()

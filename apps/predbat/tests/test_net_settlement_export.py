@@ -97,8 +97,8 @@ def run_net_settlement_window_candidate_tests(my_predbat):
             ("overlap", "export", 60, importing, [{"start": 750, "end": 800, "average": 1.0}], [(720, 750, 40.0)]),
             ("all_covered", "charge", 60, exporting, [{"start": 700, "end": 800, "average": 1.0}], []),
             ("window_15", "export", 15, seed_for(my_predbat.minutes_now, 15, 1.0, 0.2), [], [(735, 750, 40.0)]),
-            # A 90 minute window starting at 12:00 runs to 13:30
-            ("window_90", "export", 90, seed_for(my_predbat.minutes_now, 90, 1.0, 0.2), [], [(720, 750, 40.0), (750, 780, 20.0), (780, 810, 20.0)]),
+            # A 90 minute window starting at 12:00 runs to 13:30; contiguous slots at the same rate are one window
+            ("window_90", "export", 90, seed_for(my_predbat.minutes_now, 90, 1.0, 0.2), [], [(720, 750, 40.0), (750, 810, 20.0)]),
             ("list_seed", "export", 60, list(importing), [], [(720, 750, 40.0), (750, 780, 20.0)]),
         ]
         for name, kind, window, seed, existing, expected in cases:
@@ -135,6 +135,8 @@ def setup_trigger(my_predbat, window=60):
     my_predbat.export_limits_best = []
     my_predbat.charge_window_best = []
     my_predbat.charge_limit_best = []
+    my_predbat.high_export_rates = []
+    my_predbat.low_rates = []
     my_predbat.net_settlement_replan_last = None
 
 
@@ -181,23 +183,33 @@ def run_net_settlement_replan_tests(my_predbat):
             failed = True
         seed(0.6, 0.0)
         check("covered_by_export", False)
-        # The export only covered part of the window and import grew another 0.1 kWh: recompute
+        # The export only covered part of the window and the import has doubled: recompute
         my_predbat.export_window_best = [export_until(750)]
-        check("partly_covered_and_grown", True)
-        seed(0.35, 0.0)
-        check("partly_covered_not_grown", False)
+        check("partly_covered_and_doubled", True)
+        seed(0.5, 0.0)
+        check("partly_covered_not_doubled", False)
         # A freeze export window cannot cancel import, so it does not count as covering the window
         my_predbat.export_window_best = [export_until(780)]
         my_predbat.export_limits_best = [pack_export_limit(EXPORT_MODE_FREEZE)]
         seed(0.6, 0.0)
         check("freeze_does_not_cover", True)
+        # A rate window over the rest of the window: calculate_plan would offer nothing new there, so no recompute
+        my_predbat.high_export_rates = [{"start": 720, "end": 780, "average": 1.0}]
+        check("covered_by_rate_window", False)
+        my_predbat.high_export_rates = []
 
-        # A recompute that saw the windows and did not use them: stop asking for this window
+        # A recompute that saw the windows and did not use them (declined, or the plan comparison kept the old
+        # plan): ask again only once the imbalance has doubled, so the recomputes per window stay few
         my_predbat.export_window_best = []
         my_predbat.export_limits_best = []
         my_predbat.net_settlement_record_replan()
-        seed(1.5, 0.0)
-        check("declined_stops", False)
+        if (my_predbat.net_settlement_replan_last or {}).get("acted"):
+            print("ERROR: net_settlement_record_replan recorded acted with no export windows")
+            failed = True
+        seed(0.9, 0.0)
+        check("declined_not_doubled", False)
+        seed(1.2, 0.0)
+        check("declined_doubled", True)
 
         # Guards: battery at reserve, a planned charge running now, import no dearer than export, export not allowed
         for name, attr, value in (
@@ -217,9 +229,11 @@ def run_net_settlement_replan_tests(my_predbat):
             seed(1.0, 0.0)
             check(name, False)
 
-        # The charge direction mirrors it
+        # The charge direction mirrors it - charge windows are only offered alongside low rate windows
         setup_trigger(my_predbat)
         seed(0.0, 0.5)
+        check("charge_no_low_rates", False)
+        my_predbat.low_rates = [{"start": 1500, "end": 1560, "average": 10.0}]
         check("charge_first", True)
         my_predbat.soc_kw = my_predbat.soc_max
         check("charge_battery_full", False)
@@ -253,7 +267,7 @@ def run_net_settlement_replan_tests(my_predbat):
     return failed
 
 
-def run_plan(my_predbat, window, seed_import, seed_export, soc_kw, current_import_rate):
+def run_plan(my_predbat, window, seed_import, seed_export, soc_kw, current_import_rate, low_rates=None):
     """calculate_plan with 1p export, 10p import after this hour and a given metered imbalance; returns (exporting, charging) windows"""
     reset_inverter(my_predbat)
     my_predbat.minutes_now = FIXTURE_MINUTES_NOW + 25
@@ -263,7 +277,7 @@ def run_plan(my_predbat, window, seed_import, seed_export, soc_kw, current_impor
     my_predbat.args["threads"] = 0
     my_predbat.soc_kw = soc_kw
     my_predbat.cost_today_sofar = 0.0
-    my_predbat.low_rates = []
+    my_predbat.low_rates = low_rates or []
     # The 1p export rate is below the export threshold, so there are no ordinary export windows
     my_predbat.high_export_rates = []
     my_predbat.rate_export_cost_threshold = 5.0
@@ -310,8 +324,10 @@ def run_net_settlement_plan_tests(my_predbat):
                 print("ERROR: plan {} should not export at 1p, got {}".format(label, exporting))
                 failed = True
 
-        # Charge: 1.5 kWh net export metered this hour; charging now only cancels it at 1p, and later import is 10p
-        _, charging = run_plan(my_predbat, 60, 0.0, 1.5, 10.0, 30.0)
+        # Charge: 1.5 kWh net export metered this hour; charging now only cancels it at 1p, while the next low rate
+        # window (overnight) is 10p
+        night = [{"start": FIXTURE_MINUTES_NOW + 600, "end": FIXTURE_MINUTES_NOW + 660, "average": 10.0}]
+        _, charging = run_plan(my_predbat, 60, 0.0, 1.5, 10.0, 30.0, low_rates=night)
         if not charging or not all(start < hour_end for start, _ in charging):
             print("ERROR: with 1.5 kWh net export metered this hour the plan should charge before 13:00, got {}".format(charging))
             failed = True
@@ -319,10 +335,15 @@ def run_net_settlement_plan_tests(my_predbat):
             print("ERROR: the charge window should be a net settlement window, got {}".format(my_predbat.charge_window_best))
             failed = True
         for label, window, seed_export in (("no_export", 60, 0.0), ("netting_off", 0, 1.5)):
-            _, charging = run_plan(my_predbat, window, 0.0, seed_export, 10.0, 30.0)
+            _, charging = run_plan(my_predbat, window, 0.0, seed_export, 10.0, 30.0, low_rates=night)
             if any(start < hour_end for start, _ in charging):
                 print("ERROR: plan {} should not charge at 30p this hour, got {}".format(label, charging))
                 failed = True
+        # With no low rate windows at all the plan keeps the inverter's own charge windows, so none are added
+        run_plan(my_predbat, 60, 0.0, 1.5, 10.0, 30.0)
+        if any(window.get("net_settlement") for window in my_predbat.charge_window_best):
+            print("ERROR: net settlement charge windows added without low rate windows: {}".format(my_predbat.charge_window_best))
+            failed = True
     finally:
         restore(my_predbat, saved)
         if saved_threads is None:
@@ -380,6 +401,89 @@ def run_net_settlement_output_tests(my_predbat):
     row = _get_row(render(), minutes_now)
     if row is None or _codes(row) != ["charge_net_settlement"] or row["reasons"][0]["params"].get("rate") != "1.00":
         print("ERROR: net settlement charge reason unexpected: {}".format(row and row.get("reasons")))
+        failed = True
+    # The published charge window rate is the import rate, not the export rate the window cancels
+    my_predbat.publish_charge_limit(my_predbat.charge_limit_best, my_predbat.charge_window_best, best=True)
+    rates = {name: item.get("attributes", {}).get("rate") for name, item in my_predbat.dashboard_values.items() if name.startswith(my_predbat.prefix + ".best_charge") and "rate" in item.get("attributes", {})}
+    if not rates or any(rate != 30.0 for rate in rates.values()):
+        print("ERROR: best_charge rate for a net settlement window should be the 30p import rate, got {}".format(rates))
+        failed = True
+
+    failed |= run_net_settlement_plumbing_tests(my_predbat)
+    return failed
+
+
+def run_net_settlement_plumbing_tests(my_predbat):
+    """Net settlement windows stay apart from ordinary windows in merging, the horizon and the price levels, returns True on failure.
+
+    Needs my_predbat.prediction (sort_window_by_price_combined reads it), so runs after _setup_baseline.
+    """
+    failed = False
+    minutes_now = my_predbat.minutes_now
+    my_predbat.manual_all_times = []
+    my_predbat.all_active_keep = {}
+    my_predbat.all_active_keep_max = {}
+    target = pack_export_limit(EXPORT_MODE_TARGET, 10.0)
+
+    # Merging: a net settlement window and an ordinary one next to it with the same limit stay separate
+    net_charge = {"start": minutes_now, "end": minutes_now + 30, "average": 1.0, "net_settlement": True}
+    ordinary_charge = {"start": minutes_now + 30, "end": minutes_now + 60, "average": 1.0}
+    _, windows = my_predbat.discard_unused_charge_slots([8.0, 8.0], [dict(net_charge), dict(ordinary_charge)], my_predbat.reserve)
+    if [bool(window.get("net_settlement")) for window in windows] != [True, False]:
+        print("ERROR: discard_unused_charge_slots merged a net settlement window with an ordinary one: {}".format(windows))
+        failed = True
+    _, windows = my_predbat.discard_unused_charge_slots([8.0, 8.0], [dict(ordinary_charge, start=minutes_now, end=minutes_now + 30), dict(ordinary_charge)], my_predbat.reserve)
+    if len(windows) != 1:
+        print("ERROR: discard_unused_charge_slots should still merge two ordinary windows: {}".format(windows))
+        failed = True
+    net_export = {"start": minutes_now, "end": minutes_now + 30, "average": 30.0, "net_settlement": True}
+    ordinary_export = {"start": minutes_now + 30, "end": minutes_now + 60, "average": 20.0}
+    _, windows = my_predbat.discard_unused_export_slots([target, target], [dict(ordinary_export, start=minutes_now, end=minutes_now + 30), dict(net_export, start=minutes_now + 30, end=minutes_now + 60)])
+    if [bool(window.get("net_settlement")) for window in windows] != [False, True]:
+        print("ERROR: discard_unused_export_slots merged an ordinary window with a net settlement one: {}".format(windows))
+        failed = True
+
+    # The horizon is anchored on the next real low rate window, not a net settlement charge window
+    # (a one hour planning horizon, so the anchor rather than the forecast length decides the end)
+    real_charge = {"start": minutes_now + 600, "end": minutes_now + 660, "average": 5.0}
+    saved_plan_hours = my_predbat.forecast_plan_hours
+    my_predbat.forecast_plan_hours = 1
+    try:
+        with_net = my_predbat.record_length([dict(net_charge), dict(real_charge)], [8.0, 8.0], 10.0)
+        without_net = my_predbat.record_length([dict(real_charge)], [8.0], 10.0)
+    finally:
+        my_predbat.forecast_plan_hours = saved_plan_hours
+    if with_net != without_net:
+        print("ERROR: record_length moved the horizon for a net settlement charge window: {} vs {}".format(with_net, without_net))
+        failed = True
+
+    # Price levels (and the published thresholds) ignore net settlement windows entirely
+    def levels(charge_windows, charge_limits, export_windows, export_limits):
+        """find_price_levels for these windows"""
+        _, window_index, price_set, price_links = my_predbat.sort_window_by_price_combined(charge_windows, export_windows)
+        return my_predbat.find_price_levels(price_set, price_links, window_index, charge_limits, charge_windows, export_windows, export_limits)
+
+    ordinary_exports = [{"start": minutes_now + 120, "end": minutes_now + 150, "average": 20.0}, {"start": minutes_now + 180, "end": minutes_now + 210, "average": 25.0}]
+    cheap_net_export = {"start": minutes_now, "end": minutes_now + 30, "average": 10.0, "net_settlement": True}
+    got = levels([], [], [cheap_net_export] + ordinary_exports, [target] * 3)
+    expected = levels([], [], ordinary_exports, [target] * 2)
+    if got != expected:
+        print("ERROR: find_price_levels export side changed by a net settlement window: {} vs {}".format(got, expected))
+        failed = True
+    ordinary_charges = [{"start": minutes_now + 120, "end": minutes_now + 150, "average": 5.0}, {"start": minutes_now + 180, "end": minutes_now + 210, "average": 8.0}]
+    dear_net_charge = {"start": minutes_now, "end": minutes_now + 30, "average": 12.0, "net_settlement": True}
+    got = levels([dear_net_charge] + ordinary_charges, [8.0] * 3, [], [])
+    expected = levels(ordinary_charges, [8.0] * 2, [], [])
+    if got != expected:
+        print("ERROR: find_price_levels charge side changed by a net settlement window: {} vs {}".format(got, expected))
+        failed = True
+
+    # remove_intersecting_windows keeps the mark when an active export clips a net settlement charge window
+    from utils import remove_intersecting_windows
+
+    _, clipped = remove_intersecting_windows([8.0], [dict(net_charge, end=minutes_now + 60)], [target], [{"start": minutes_now, "end": minutes_now + 15, "average": 20.0}])
+    if len(clipped) != 1 or not clipped[0].get("net_settlement") or clipped[0]["start"] != minutes_now + 15:
+        print("ERROR: remove_intersecting_windows lost the net settlement mark when clipping: {}".format(clipped))
         failed = True
     return failed
 

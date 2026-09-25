@@ -357,6 +357,9 @@ class Plan:
             for key in links:
                 window_n = window_index[key]["id"]
                 typ = window_index[key]["type"]
+                # Net settlement windows are priced at the rate they cancel, not a real import/export rate
+                if (typ == "c" and charge_window[window_n].get("net_settlement")) or (typ == "d" and export_window[window_n].get("net_settlement")):
+                    continue
                 if typ == "c":
                     if (highest_price_charge_level is None) or (price < highest_price_charge_level):
                         highest_price_charge_level = price
@@ -1009,7 +1012,8 @@ class Plan:
         next_charge_start = self.forecast_minutes + self.minutes_now
         if charge_window:
             for window_n in range(len(charge_window)):
-                if charge_limit[window_n] > 0 and charge_window[window_n]["average"] <= best_price:
+                # A net settlement charge window is priced at the export rate it cancels, not a low import rate
+                if charge_limit[window_n] > 0 and charge_window[window_n]["average"] <= best_price and not charge_window[window_n].get("net_settlement"):
                     next_charge_start = charge_window[window_n]["start"]
                     if next_charge_start < self.minutes_now:
                         next_charge_start = charge_window[window_n]["end"]
@@ -1419,10 +1423,11 @@ class Plan:
 
             # Calculate best charge windows
             # Net settlement: let the optimiser charge against export already metered in this window
-            net_charge_windows = self.net_settlement_windows("charge", self.low_rates) if (self.calculate_best_charge and self.set_charge_window) else []
+            # Only alongside calculated low rate windows: with none, the plan keeps the inverter's own charge windows
+            net_charge_windows = self.net_settlement_windows("charge", self.low_rates) if (self.low_rates and self.calculate_best_charge and self.set_charge_window) else []
             if net_charge_windows:
                 self.log("Net settlement: {} kWh net export metered in the current window, adding charge window(s) {}".format(dp2(self.net_settlement_imbalance()[1]), net_charge_windows))
-            if (self.low_rates or net_charge_windows) and self.calculate_best_charge and self.set_charge_window:
+            if self.low_rates and self.calculate_best_charge and self.set_charge_window:
                 # If we are using calculated windows directly then save them
                 self.charge_window_best = sorted(clone_windows(self.low_rates) + net_charge_windows, key=lambda window: window["start"])
             else:
@@ -2862,9 +2867,16 @@ class Plan:
         candidates = []
         while start < window_end:
             end = min((start // interval + 1) * interval, window_end)
-            if not any(existing["start"] < end and existing["end"] > start for existing in existing_windows):
+            overlaps = any(existing["start"] < end and existing["end"] > start for existing in existing_windows)
+            manual = any(minute in self.manual_all_times for minute in range(start, end, PREDICT_STEP))
+            if not overlaps and not manual:
                 slot_rates = [rates.get(minute, 0) for minute in range(start, end, PREDICT_STEP)]
-                candidates.append({"start": start, "end": end, "average": dp2(sum(slot_rates) / len(slot_rates)), "net_settlement": True})
+                average = dp2(sum(slot_rates) / len(slot_rates))
+                if candidates and candidates[-1]["end"] == start and candidates[-1]["average"] == average:
+                    # Contiguous slots at the same rate are one choice for the optimiser - keeps long windows cheap to search
+                    candidates[-1]["end"] = end
+                else:
+                    candidates.append({"start": start, "end": end, "average": average, "net_settlement": True})
             start = end
         return candidates
 
@@ -2909,11 +2921,12 @@ class Plan:
         The windows from net_settlement_windows are only added when the plan is recomputed (every
         calculate_plan_every minutes by default). To react within the window this asks for a recompute:
 
-        - when the window's imbalance first reaches NET_SETTLEMENT_REPLAN_KWH, or has grown by that much
-          since the last recompute in this window, provided net_settlement_can_act and the plan does not
-          already export (charge) over the rest of the window. Once a recompute in this window added the
-          windows and the plan did not use them, it stops asking until the window ends - the scheduled
-          recomputes still reconsider it;
+        - when the window's imbalance first reaches NET_SETTLEMENT_REPLAN_KWH, or has doubled since the
+          last recompute in this window, provided net_settlement_can_act and the plan does not already
+          export (charge) over the rest of the window. Doubling rather than a fixed step keeps the number
+          of extra recomputes per window small while import (export) keeps growing, including when the
+          optimiser declines, and still gives a larger imbalance another chance - a small one may not have
+          been worth replacing the plan for (metric_min_improvement_plan);
         - once, when a net settlement window is running but the imbalance it was cancelling has gone, so
           the export (charge) stops instead of running on at the plain rate until the next scheduled
           recompute.
@@ -2934,12 +2947,18 @@ class Plan:
 
         if kind is None or amount < NET_SETTLEMENT_REPLAN_KWH or not self.net_settlement_can_act(kind):
             return False
-        if state and state.get("kind") == kind:
-            if not state.get("acted"):
-                return False
-            if amount < state.get("level", 0) + NET_SETTLEMENT_REPLAN_KWH:
-                return False
-        return bool(self.net_settlement_windows(kind, self.net_settlement_active_windows(kind)))
+        if state and state.get("kind") == kind and amount < 2 * state.get("level", 0):
+            # Ask again only once the imbalance has doubled since the last recompute in this window, whether or
+            # not that recompute used the windows: a small imbalance may not have been worth replacing the plan
+            # for (metric_min_improvement_plan), a larger one may be, and doubling bounds the recomputes per window
+            return False
+        # Only worth a recompute if it would offer something: calculate_plan skips slots the rate windows
+        # (high_export_rates / low_rates) overlap, and slots the plan already exports (charges) in are covered
+        rate_windows = self.high_export_rates if kind == "export" else self.low_rates
+        if kind == "charge" and not self.low_rates:
+            # calculate_plan only adds charge windows alongside low rate windows of its own
+            return False
+        return bool(self.net_settlement_windows(kind, rate_windows + self.net_settlement_active_windows(kind)))
 
     def net_settlement_record_replan(self):
         """Record the outcome of a recompute for net_settlement_replan_needed.
@@ -3009,6 +3028,7 @@ class Plan:
                 and (new_window_best[-1]["start"] not in self.manual_all_times)
                 and (new_window_best[-1]["start"] not in self.all_active_keep)
                 and (new_window_best[-1]["average"] >= window["average"] or not self.set_charge_low_power or limit == self.reserve)
+                and bool(new_window_best[-1].get("net_settlement")) == bool(window.get("net_settlement"))
             ):
                 # Combine two windows of the same charge target provided the rates are the same or low power mode is off (low power mode can skew the charge into the more expensive slot)
                 new_window_best[-1]["end"] = end
@@ -3027,6 +3047,7 @@ class Plan:
                 and (new_window_best[-1]["start"] not in self.all_active_keep)
                 and new_window_best[-1]["average"] == window["average"]
                 and (new_window_best[-1]["target"] < new_limit_best[-1])
+                and bool(new_window_best[-1].get("net_settlement")) == bool(window.get("net_settlement"))
             ):
                 # Combine two windows of the same price, provided the second charge limit is greater than the first
                 # and the old charge never reaches it defined limit
@@ -3313,6 +3334,8 @@ class Plan:
                     and (new_best[-1]["start"] not in self.manual_all_times)
                     and (export_window_best[window_n]["start"] not in self.all_active_keep_max)
                     and (new_best[-1]["start"] not in self.all_active_keep_max)
+                    # A net settlement window is labelled and priced differently, so never merge it with an ordinary one
+                    and bool(new_best[-1].get("net_settlement")) == bool(export_window_best[window_n].get("net_settlement"))
                 ):
                     new_best[-1]["end"] = export_window_best[window_n]["end"]
                     new_best[-1]["target"] = export_window_best[window_n].get("target", export_limits_best[window_n])

@@ -640,16 +640,18 @@ what the rest of it is worth:
 
 Predbat then offers the optimiser the rest of the window as export (or charge) slots, even where the rate would normally keep them
 out of the plan: export slots are normally limited to export rates above the export rate threshold (set with
-**input_number.predbat_rate_high_threshold**) and above zero, and charge slots to import rates below the import rate threshold. The
-optimiser uses them only if the plan comes out cheaper. In the plan these slots say they are cancelling import (export) already
-metered in the settlement window.
+**input_number.predbat_rate_high_threshold**) and above zero, and charge slots to import rates below the import rate threshold
+(charge slots are only added when the plan has low rate charge windows of its own). The optimiser uses them only if the plan comes
+out cheaper, and a recomputed plan only replaces the current one if it is better by at least
+**input_number.predbat_metric_min_improvement_plan**, so a small imbalance may not be worth acting on. In the plan these slots say
+they are cancelling import (export) already metered in the settlement window.
 
 Plans are normally recomputed every **input_number.predbat_calculate_plan_every** minutes. So that it can act before the window
 ends, Predbat also recomputes the plan at the next 5 minute update when the metered imbalance reaches 0.1 kWh, and again each time
-it grows by another 0.1 kWh, provided the battery has room (above reserve to export, below full to charge), no planned charge
-(export) is running and the import rate is above the export rate. If a recompute offered the slots and the plan didn't use them, it
-doesn't ask again for that window. Once the imbalance has been cancelled it recomputes once more, so the export (or charge) stops
-instead of running on at the plain rate.
+it has doubled since the last recompute in that window, provided the battery has room (above reserve to export, below full to
+charge), no planned charge (export) is running, the import rate is above the export rate and the plan isn't already exporting
+(charging) for the rest of the window. Once the imbalance has been cancelled it recomputes once more, so the export (or charge)
+stops instead of running on at the plain rate.
 
 Only import or export that has already been metered counts, so when the window is balanced the thresholds work as before.
 
