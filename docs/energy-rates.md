@@ -622,15 +622,36 @@ Things to be aware of:
   the plain per-slot rates. That covers when the iBoost diverter runs (its rate thresholds, gas comparisons and smart iBoost
   slots) and which slots car charging picks. For example, in an hour that is mostly import, solar diverted to iBoost is really
   worth the import rate, because it would otherwise have cancelled import, but iBoost still judges it at the export rate.
-- If the current window has already imported more than it exported (for example a load spike beyond what the battery can
-  cover), exporting from the battery before the window ends cancels that import, so it is worth the import rate, however low the
-  export rate is. Predbat then offers the optimiser the rest of the window as export slots, even where the export rate is below
-  the export threshold (**input_number.predbat_rate_high_threshold**), and exports if the plan says it's worth it. When the net
-  import grows by 0.1 kWh or more it recomputes the plan straight away rather than waiting for the next scheduled recompute, so it
-  can react before the window ends. Only import that has already happened counts, so without it the export threshold works as
-  before.
+- Predbat can export or charge to cancel import or export that has already happened in the current window, see
+  [below](#reacting-to-import-or-export-already-metered-in-the-window).
 - Netting doesn't always lower the cost. If your export rate is higher than your import rate in the same window, netting takes
   away the profit of importing and exporting in that window, and the plan changes to match.
+
+### Reacting to import or export already metered in the window
+
+Because import and export kWh cancel each other out within a window, what has already been metered in the current window changes
+what the rest of it is worth:
+
+- If the window has already **imported** more than it exported (for example a load spike beyond what the battery can cover),
+  exporting from the battery before the window ends cancels that import, so it is worth the **import** rate, however low the
+  export rate is.
+- If the window has already **exported** more than it imported, charging the battery from the grid before the window ends cancels
+  that export, so it only costs the **export** rate, however high the import rate is.
+
+Predbat then offers the optimiser the rest of the window as export (or charge) slots, even where the rate would normally keep them
+out of the plan: export slots are normally limited to export rates above the export rate threshold (set with
+**input_number.predbat_rate_high_threshold**) and above zero, and charge slots to import rates below the import rate threshold. The
+optimiser uses them only if the plan comes out cheaper. In the plan these slots say they are cancelling import (export) already
+metered in the settlement window.
+
+Plans are normally recomputed every **input_number.predbat_calculate_plan_every** minutes. So that it can act before the window
+ends, Predbat also recomputes the plan at the next 5 minute update when the metered imbalance reaches 0.1 kWh, and again each time
+it grows by another 0.1 kWh, provided the battery has room (above reserve to export, below full to charge), no planned charge
+(export) is running and the import rate is above the export rate. If a recompute offered the slots and the plan didn't use them, it
+doesn't ask again for that window. Once the imbalance has been cancelled it recomputes once more, so the export (or charge) stops
+instead of running on at the plain rate.
+
+Only import or export that has already been metered counts, so when the window is balanced the thresholds work as before.
 
 ## Rate offsets
 

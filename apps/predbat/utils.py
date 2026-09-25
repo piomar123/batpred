@@ -2330,7 +2330,13 @@ def remove_intersecting_windows(charge_limit_best, charge_window_best, export_li
     if not export_active:
         # Rebuild the windows rather than passing the caller's dicts back, so the returned windows
         # carry exactly the same keys (and are as freshly owned) as on the clipping path below
-        return list(charge_limit_best), [{"start": w["start"], "end": w["end"], "average": w["average"]} for w in charge_window_best]
+        new_window_best = []
+        for w in charge_window_best:
+            new_window = {"start": w["start"], "end": w["end"], "average": w["average"]}
+            if w.get("net_settlement"):
+                new_window["net_settlement"] = True
+            new_window_best.append(new_window)
+        return list(charge_limit_best), new_window_best
 
     new_limit_best = []
     new_window_best = []
@@ -2341,13 +2347,15 @@ def remove_intersecting_windows(charge_limit_best, charge_window_best, export_li
         start = window["start"]
         end = window["end"]
         average = window["average"]
+        # The one optional key carried through: it marks a net settlement window (Plan.net_settlement_windows)
+        extra = {"net_settlement": True} if window.get("net_settlement") else None
         limit = charge_limit_best[window_n]
         clipped = False
 
         if limit <= 0.0:
             # A disabled charge window can never be clipped; rebuild it exactly as the clipping
             # path below would have done, so the returned dicts are equivalent either way
-            new_window_best.append({"start": start, "end": end, "average": average})
+            new_window_best.append(dict(start=start, end=end, average=average, **extra) if extra else {"start": start, "end": end, "average": average})
             new_limit_best.append(limit)
             continue
 
@@ -2366,13 +2374,13 @@ def remove_intersecting_windows(charge_limit_best, charge_window_best, export_li
                 else:
                     # Two segments - emit the head now, carry on clipping the tail
                     if (dstart - start) >= 5:
-                        new_window_best.append({"start": start, "end": dstart, "average": average})
+                        new_window_best.append(dict(start=start, end=dstart, average=average, **extra) if extra else {"start": start, "end": dstart, "average": average})
                         new_limit_best.append(limit)
                     start = dend
                     clipped = True
 
         if not clipped or ((end - start) >= 5):
-            new_window_best.append({"start": start, "end": end, "average": average})
+            new_window_best.append(dict(start=start, end=end, average=average, **extra) if extra else {"start": start, "end": end, "average": average})
             new_limit_best.append(limit)
 
     return new_limit_best, new_window_best

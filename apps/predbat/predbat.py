@@ -680,7 +680,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         # Last raw metric_net_settlement_window_minutes seen by fetch_config_options, so it only logs on change
         self.net_settlement_window_arg = None
         self.net_settlement_seed = None
-        # (window id, metered net import kWh) at the last recompute net_settlement_replan_needed asked for
+        # Outcome of the last recompute in the current net settlement window (Plan.net_settlement_record_replan)
         self.net_settlement_replan_last = None
 
         for root in CONFIG_ROOTS:

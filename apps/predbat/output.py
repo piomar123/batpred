@@ -46,6 +46,8 @@ REASON_TEMPLATES = {
     "freeze_export": "Freezing export — solar surplus passes straight to the grid, but it's not worth discharging the battery to sell more this slot.",
     "hold_export_unreachable": "Export window active but not triggered — the battery isn't predicted to reach the {target_percent}% level needed to export this slot.",
     "export_high_rate": "Exporting down to {target_percent}% at {rate_kw}kW at the export rate of ({rate}p/kWh) using stored energy back to the grid.",
+    "charge_net_settlement": "Charging up to {target_percent}% at {rate_kw}kW to cancel export already metered in this settlement window, which only costs the export rate ({rate}p/kWh).",
+    "export_net_settlement": "Exporting down to {target_percent}% at {rate_kw}kW to cancel import already metered in this settlement window, which is worth the import rate ({rate}p/kWh).",
     "manual_override_charge": "You manually set this slot to charge.",
     "manual_override_freeze_charge": "You manually set this slot to freeze charging.",
     "manual_override_export": "You manually set this slot to export.",
@@ -1423,7 +1425,10 @@ class Output:
                         state_color = "#3AEE85"
                         raw_state = "Chrg"
                         rate_kw = self.get_charge_rate_kw(charge_window_n, minute_start, minute_relative_start, pv_forecast_minute_step)
-                        reason_parts.append({"code": "charge_low_rate", "params": {"target_percent": limit_percent, "rate": rate_text_import, "rate_kw": "{:.2f}".format(rate_kw)}})
+                        if self.charge_window_best[charge_window_n].get("net_settlement"):
+                            reason_parts.append({"code": "charge_net_settlement", "params": {"target_percent": limit_percent, "rate": rate_text_export, "rate_kw": "{:.2f}".format(rate_kw)}})
+                        else:
+                            reason_parts.append({"code": "charge_low_rate", "params": {"target_percent": limit_percent, "rate": rate_text_import, "rate_kw": "{:.2f}".format(rate_kw)}})
 
                     if self.charge_window_best[charge_window_n]["start"] in self.manual_charge_times:
                         state += " &#8526;"
@@ -1507,7 +1512,10 @@ class Output:
                         raw_state = "Exp"
                         export_rate_adjust = export_power_of(limit)
                         rate_kw = dp2(self.battery_rate_max_export * export_rate_adjust * MINUTE_WATT / 1000.0)
-                        reason_parts.append({"code": "export_high_rate", "params": {"target_percent": dp2(target), "rate": rate_text_export, "rate_kw": "{:.2f}".format(rate_kw)}})
+                        if self.export_window_best[export_window_n].get("net_settlement"):
+                            reason_parts.append({"code": "export_net_settlement", "params": {"target_percent": dp2(target), "rate": rate_text_import, "rate_kw": "{:.2f}".format(rate_kw)}})
+                        else:
+                            reason_parts.append({"code": "export_high_rate", "params": {"target_percent": dp2(target), "rate": rate_text_export, "rate_kw": "{:.2f}".format(rate_kw)}})
                     show_limit = str(dp2(target))
                     raw_state_target = str(dp2(target))
 
@@ -2415,6 +2423,9 @@ class Output:
             export_start_minutes = export_window[0]["start"]
             export_end_minutes = export_window[0]["end"]
             export_average = export_window[0].get("average", None)
+            if export_window[0].get("net_settlement"):
+                # A net settlement window's average is the import rate it cancels; publish the export rate
+                export_average = self.rate_export.get(export_start_minutes, export_average)
             export_start_in_minutes = max(export_start_minutes - self.minutes_now, 0)
             export_end_in_minutes = max(export_end_minutes - self.minutes_now, 0)
 
@@ -2589,6 +2600,9 @@ class Output:
             charge_start_minutes = charge_window[0]["start"]
             charge_end_minutes = charge_window[0]["end"]
             charge_average_first = charge_window[0].get("average", None)
+            if charge_window[0].get("net_settlement"):
+                # A net settlement window's average is the export rate it cancels; publish the import rate
+                charge_average_first = self.rate_import.get(charge_window[0]["start"], charge_average_first)
             charge_start_in_minutes = max(charge_start_minutes - self.minutes_now, 0)
             charge_end_in_minutes = max(charge_end_minutes - self.minutes_now, 0)
 

@@ -376,6 +376,9 @@ class Plan:
                 if typ == "c":
                     if price == real_highest_price_charge:
                         continue
+                    if charge_window[window_n].get("net_settlement"):
+                        # Priced at the export rate it cancels, not an import rate - keep it out of the published threshold
+                        continue
                     if charge_limit[window_n] > self.reserve:
                         if highest_price_charge is None:
                             highest_price_charge = charge_window[window_n]["average"]
@@ -387,6 +390,9 @@ class Plan:
                             highest_price_charge_level = max(highest_price_charge_level, price)
                 elif typ == "d":
                     if price == real_lowest_price_export:
+                        continue
+                    if export_window[window_n].get("net_settlement"):
+                        # Priced at the import rate it cancels, not an export rate - keep it out of the published threshold
                         continue
                     if export_mode_of(export_limits[window_n]) == EXPORT_MODE_TARGET:
                         if lowest_price_export is None:
@@ -1412,9 +1418,13 @@ class Plan:
             self.plan_valid = False  # In case of crash, plan is now invalid
 
             # Calculate best charge windows
-            if self.low_rates and self.calculate_best_charge and self.set_charge_window:
+            # Net settlement: let the optimiser charge against export already metered in this window
+            net_charge_windows = self.net_settlement_windows("charge", self.low_rates) if (self.calculate_best_charge and self.set_charge_window) else []
+            if net_charge_windows:
+                self.log("Net settlement: {} kWh net export metered in the current window, adding charge window(s) {}".format(dp2(self.net_settlement_imbalance()[1]), net_charge_windows))
+            if (self.low_rates or net_charge_windows) and self.calculate_best_charge and self.set_charge_window:
                 # If we are using calculated windows directly then save them
-                self.charge_window_best = clone_windows(self.low_rates)
+                self.charge_window_best = sorted(clone_windows(self.low_rates) + net_charge_windows, key=lambda window: window["start"])
             else:
                 # Default best charge window as this one
                 self.charge_window_best = clone_windows(self.charge_window)
@@ -1423,10 +1433,9 @@ class Plan:
             if self.calculate_best_export and self.set_export_window:
                 self.export_window_best = clone_windows(self.high_export_rates)
                 # Net settlement: let the optimiser export against import already metered in this window
-                net_export_windows = self.net_settlement_export_windows(self.export_window_best)
+                net_export_windows = self.net_settlement_windows("export", self.export_window_best)
                 if net_export_windows:
-                    net_seed = net_settlement_seed_from(self.net_settlement_seed)
-                    self.log("Net settlement: {} kWh net import metered in the current window, adding export window(s) {}".format(dp2(net_seed.import_kwh - net_seed.export_kwh), net_export_windows))
+                    self.log("Net settlement: {} kWh net import metered in the current window, adding export window(s) {}".format(dp2(self.net_settlement_imbalance()[1]), net_export_windows))
                     self.export_window_best = sorted(self.export_window_best + net_export_windows, key=lambda window: window["start"])
             else:
                 self.export_window_best = clone_windows(self.export_window)
@@ -1713,6 +1722,9 @@ class Plan:
 
             # Carry the pre-clip snapshot of whichever plan we kept into the next cycle
             self.plan_preclip = preclip_new
+
+            # Remember what this recompute did about the current net settlement window
+            self.net_settlement_record_replan()
 
             # Plan is now valid
             self.log("Plan valid is now true after recompute was {}".format(self.plan_valid))
@@ -2800,64 +2812,148 @@ class Plan:
 
         return window_sort, window_links
 
-    def net_settlement_export_windows(self, export_windows):
-        """Extra export windows for the rest of the current net settlement window, when it has metered net import.
+    def net_settlement_imbalance(self):
+        """What the current net settlement window has metered so far, as (kind, kWh, seed).
 
-        Export windows normally come from high_export_rates, which leaves out slots whose export rate is
-        below rate_export_cost_threshold. Under net settlement, though, export in a window that has
-        already imported cancels that import, so it is worth the import rate - exporting from the battery
-        can pay for an unplanned import even when the export rate is very low. This offers the optimiser
-        the rest of the current window, split on plan interval boundaries, wherever no export window
-        already covers it; the netted metric then decides whether and how much to export. The windows'
-        average is the import rate, which is what exporting against the import is worth.
-
-        Only metered import counts (net_settlement_seed, from today_cost), so without an import to cancel
-        nothing is added and rate_export_cost_threshold is respected as before. Returns the new windows.
+        kind is "export" when the window has metered net import - exporting before it ends would cancel
+        it - and "charge" when it has metered net export - importing (charging the battery) would cancel
+        that. kWh is the size of the imbalance. (None, 0.0, seed) when netting is off, there is no seed
+        for the current window, or it is balanced.
         """
         window = self.metric_net_settlement_window_minutes
         if window <= 0:
-            return []
+            return None, 0.0, None
         seed = net_settlement_seed_from(self.net_settlement_seed)
-        window_id = self.minutes_now // window
-        if not seed or seed.window != window_id or seed.import_kwh <= seed.export_kwh:
+        if not seed or seed.window != self.minutes_now // window:
+            return None, 0.0, seed
+        net_import = seed.import_kwh - seed.export_kwh
+        if net_import > 0:
+            return "export", net_import, seed
+        if net_import < 0:
+            return "charge", -net_import, seed
+        return None, 0.0, seed
+
+    def net_settlement_windows(self, kind, existing_windows):
+        """Extra export ("export") or charge ("charge") windows for the rest of the current net settlement window.
+
+        Under net settlement import and export kWh cancel each other out within the window. Once it has
+        metered net import, exporting from the battery before it ends cancels that import and is worth
+        the import rate, however low the export rate is; once it has metered net export, charging from
+        the grid cancels that export and only costs the export rate. Export windows only come from
+        high_export_rates and charge windows from low_rates, which leave these slots out when the
+        export rate is low or the import rate is high, so this offers the optimiser the rest of the
+        window, split on plan interval boundaries, wherever none of existing_windows already overlaps.
+        The netted metric then decides whether and how much to use them.
+
+        Each window's average is the rate its energy cancels - the import rate for export windows, the
+        export rate for charge windows - and it is marked "net_settlement" so outputs can tell it apart.
+        Only what has already been metered counts (net_settlement_seed, from today_cost), so without an
+        imbalance of that kind nothing is added. Returns the new windows.
+        """
+        imbalance, _, _ = self.net_settlement_imbalance()
+        if imbalance != kind:
             return []
+        window = self.metric_net_settlement_window_minutes
+        window_id = self.minutes_now // window
         interval = self.plan_interval_minutes
         window_end = (window_id + 1) * window
         start = max(window_id * window, (self.minutes_now // interval) * interval)
+        rates = self.rate_import if kind == "export" else self.rate_export
         candidates = []
         while start < window_end:
             end = min((start // interval + 1) * interval, window_end)
-            if not any(existing["start"] < end and existing["end"] > start for existing in export_windows):
-                import_rates = [self.rate_import.get(minute, 0) for minute in range(start, end, PREDICT_STEP)]
-                candidates.append({"start": start, "end": end, "average": dp2(sum(import_rates) / len(import_rates))})
+            if not any(existing["start"] < end and existing["end"] > start for existing in existing_windows):
+                slot_rates = [rates.get(minute, 0) for minute in range(start, end, PREDICT_STEP)]
+                candidates.append({"start": start, "end": end, "average": dp2(sum(slot_rates) / len(slot_rates)), "net_settlement": True})
             start = end
         return candidates
 
-    def net_settlement_replan_needed(self):
-        """True when the plan should be recomputed now to consider exporting against import metered in this window.
+    def net_settlement_active_windows(self, kind):
+        """The plan's export (or charge) windows that would really export (charge) and have not yet ended"""
+        if kind == "export":
+            return [window for window, limit in zip(self.export_window_best, self.export_limits_best) if window["end"] > self.minutes_now and export_mode_of(limit) not in (EXPORT_MODE_IDLE, EXPORT_MODE_FREEZE)]
+        return [window for window, limit in zip(self.charge_window_best, self.charge_limit_best) if window["end"] > self.minutes_now and limit > self.reserve and not self.is_freeze_charge(limit)]
 
-        The export windows from net_settlement_export_windows are only added when the plan is recomputed
-        (every calculate_plan_every minutes by default). To react within the window, this asks for a
-        recompute when the current window's metered net import has grown by NET_SETTLEMENT_REPLAN_KWH
-        since the last recompute it asked for, and the current plan has no export window covering the
-        rest of the window. Remembering the level it replanned at keeps it from replanning every cycle.
+    def net_settlement_window_key(self, seed):
+        """The current net settlement window as an absolute key (epoch minutes of its start), stable across midnight"""
+        return int(self.midnight_utc.timestamp() // 60) + seed.window * self.metric_net_settlement_window_minutes
+
+    def net_settlement_replan_state_now(self, seed):
+        """net_settlement_replan_last if it was recorded in the current window, else None"""
+        state = self.net_settlement_replan_last
+        if not isinstance(state, dict) or seed is None or state.get("window") != self.net_settlement_window_key(seed):
+            return None
+        return state
+
+    def net_settlement_can_act(self, kind):
+        """Whether exporting (charging) against the current window's imbalance is possible and could pay.
+
+        The plan has to be allowed to set export (charge) windows, the battery needs room - above
+        reserve to export, below full to charge - no planned charge (export) may be running now, and the
+        import rate now has to be above the export rate, or cancelling one against the other gains
+        nothing.
+        """
+        margin = NET_SETTLEMENT_REPLAN_KWH
+        if self.rate_import.get(self.minutes_now, 0) <= self.rate_export.get(self.minutes_now, 0):
+            return False
+        opposite = "charge" if kind == "export" else "export"
+        if any(window["start"] <= self.minutes_now for window in self.net_settlement_active_windows(opposite)):
+            return False
+        if kind == "export":
+            return self.calculate_best_export and self.set_export_window and (self.soc_kw - self.reserve) >= margin
+        return self.calculate_best_charge and self.set_charge_window and (self.soc_max - self.soc_kw) >= margin
+
+    def net_settlement_replan_needed(self):
+        """True when the plan should be recomputed now because of the current net settlement window.
+
+        The windows from net_settlement_windows are only added when the plan is recomputed (every
+        calculate_plan_every minutes by default). To react within the window this asks for a recompute:
+
+        - when the window's imbalance first reaches NET_SETTLEMENT_REPLAN_KWH, or has grown by that much
+          since the last recompute in this window, provided net_settlement_can_act and the plan does not
+          already export (charge) over the rest of the window. Once a recompute in this window added the
+          windows and the plan did not use them, it stops asking until the window ends - the scheduled
+          recomputes still reconsider it;
+        - once, when a net settlement window is running but the imbalance it was cancelling has gone, so
+          the export (charge) stops instead of running on at the plain rate until the next scheduled
+          recompute.
+
+        It only reads state: calculate_plan records each recompute's outcome (net_settlement_record_replan).
         """
         window = self.metric_net_settlement_window_minutes
-        if window <= 0 or not (self.calculate_best_export and self.set_export_window):
+        kind, amount, seed = self.net_settlement_imbalance()
+        if window <= 0 or seed is None or seed.window != self.minutes_now // window:
             return False
-        seed = net_settlement_seed_from(self.net_settlement_seed)
-        if not seed or seed.window != self.minutes_now // window:
+        state = self.net_settlement_replan_state_now(seed)
+
+        # The imbalance a running net settlement window was cancelling has gone - stop it (once)
+        for running in ("export", "charge"):
+            if running != kind and any(window.get("net_settlement") and window["start"] <= self.minutes_now for window in self.net_settlement_active_windows(running)):
+                if state is None or state.get("kind") == running:
+                    return True
+
+        if kind is None or amount < NET_SETTLEMENT_REPLAN_KWH or not self.net_settlement_can_act(kind):
             return False
-        net_import = seed.import_kwh - seed.export_kwh
-        if net_import < NET_SETTLEMENT_REPLAN_KWH:
-            return False
-        last = self.net_settlement_replan_last
-        if last and last[0] == seed.window and net_import < last[1] + NET_SETTLEMENT_REPLAN_KWH:
-            return False
-        if not self.net_settlement_export_windows(self.export_window_best):
-            return False
-        self.net_settlement_replan_last = (seed.window, net_import)
-        return True
+        if state and state.get("kind") == kind:
+            if not state.get("acted"):
+                return False
+            if amount < state.get("level", 0) + NET_SETTLEMENT_REPLAN_KWH:
+                return False
+        return bool(self.net_settlement_windows(kind, self.net_settlement_active_windows(kind)))
+
+    def net_settlement_record_replan(self):
+        """Record the outcome of a recompute for net_settlement_replan_needed.
+
+        Stores the current window, the imbalance it saw and whether the plan now exports (charges) against
+        it in a net settlement window.
+        """
+        window = self.metric_net_settlement_window_minutes
+        kind, amount, seed = self.net_settlement_imbalance()
+        if window <= 0 or seed is None or seed.window != self.minutes_now // window:
+            self.net_settlement_replan_last = None
+            return
+        acted = bool(kind) and any(window.get("net_settlement") for window in self.net_settlement_active_windows(kind))
+        self.net_settlement_replan_last = {"window": self.net_settlement_window_key(seed), "kind": kind, "level": amount, "acted": acted}
 
     def sort_window_by_price(self, windows, reverse_time=False):
         """

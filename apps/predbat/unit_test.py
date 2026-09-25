@@ -442,7 +442,7 @@ def main():
         ("model_kernel", run_model_kernel_tests, "Model tests run with the C++ prediction kernel enabled", False),
         ("kernel_parity", run_kernel_parity_tests, "C++ prediction kernel vs Python engine parity tests", False),
         ("net_settlement_config", run_net_settlement_config_tests, "metric_net_settlement_window_minutes parsing and logging tests", False),
-        ("net_settlement_export", run_net_settlement_export_tests, "Exporting against import metered in the current net settlement window", False),
+        ("net_settlement_export", run_net_settlement_export_tests, "Exporting or charging against an imbalance metered in the current net settlement window", False),
         ("prediction_batch", run_prediction_batch_tests, "Batched prediction fan-out tests", False),
         ("inverter", run_inverter_tests, "Inverter tests", False),
         ("execute", run_execute_tests, "Execute tests", False),
