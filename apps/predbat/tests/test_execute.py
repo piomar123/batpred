@@ -12,6 +12,8 @@ from tests.test_infra import reset_inverter
 from const import EXPORT_MODE_TARGET, EXPORT_MODE_FREEZE, MINUTE_WATT
 from utils import pack_export_limit
 from utils import calc_percent_limit
+from execute import CURVE_SEARCH_RETRY_MINUTES
+from datetime import timedelta
 
 
 class ActiveTestInverter:
@@ -585,6 +587,99 @@ def test_fetch_inverter_data_no_extra_pv_when_sensors_match_inverters(my_predbat
         print("ERROR: pv_power should be 500 (sensor count matches inverter count, no extra lookup), got {}".format(result))
         return True
     return False
+
+
+class CurveSearchTestInverter(ActiveTestInverter):
+    """ActiveTestInverter that counts curve searches and returns a set result"""
+
+    def __init__(self, id, soc_kw, soc_max, now_utc, result=None):
+        super().__init__(id, soc_kw, soc_max, now_utc)
+        self.curve_searches = {"charge": 0, "discharge": 0}
+        self.curve_result = result
+
+    def find_charge_curve(self, discharge=False):
+        self.curve_searches["discharge" if discharge else "charge"] += 1
+        return self.curve_result
+
+
+def test_fetch_inverter_data_curve_search_retry(my_predbat):
+    """
+    Test that an "auto" charge/discharge curve search that finds nothing is retried at most once
+    every CURVE_SEARCH_RETRY_MINUTES, not on every inverter poll; that a found curve stops the
+    search; and that without "auto" a failed search still runs only once.
+    """
+    print("  - test_fetch_inverter_data_curve_search_retry")
+    failed = False
+    names = [
+        "battery_charge_power_curve",
+        "battery_charge_power_curve_auto",
+        "battery_charge_power_curve_default",
+        "computed_charge_curve",
+        "charge_curve_last_search",
+        "battery_discharge_power_curve",
+        "battery_discharge_power_curve_auto",
+        "battery_discharge_power_curve_default",
+        "computed_discharge_curve",
+        "discharge_curve_last_search",
+        "now_utc",
+        "inverters",
+    ]
+    saved = {name: getattr(my_predbat, name) for name in names}
+    saved_num_inverters = my_predbat.args.get("num_inverters")
+    start = my_predbat.now_utc
+
+    def setup(auto, result=None):
+        for kind in ["charge", "discharge"]:
+            setattr(my_predbat, "battery_{}_power_curve".format(kind), {})
+            setattr(my_predbat, "battery_{}_power_curve_auto".format(kind), auto)
+            setattr(my_predbat, "battery_{}_power_curve_default".format(kind), {})
+            setattr(my_predbat, "computed_{}_curve".format(kind), False)
+            setattr(my_predbat, "{}_curve_last_search".format(kind), None)
+        my_predbat.now_utc = start
+        inverter = CurveSearchTestInverter(0, soc_kw=5, soc_max=10, now_utc=start, result=result)
+        my_predbat.inverters = [inverter]
+        my_predbat.args["num_inverters"] = 1
+        return inverter
+
+    def poll(minutes):
+        my_predbat.now_utc = start + timedelta(minutes=minutes)
+        my_predbat.fetch_inverter_data()
+
+    def check(inverter, expect, when):
+        nonlocal failed
+        if inverter.curve_searches != expect:
+            print("ERROR: {} expected curve searches {} got {}".format(when, expect, inverter.curve_searches))
+            failed = True
+
+    try:
+        # auto, nothing found: searched on the first poll, then only once the retry interval has passed
+        inverter = setup(auto=True)
+        for minute in range(0, CURVE_SEARCH_RETRY_MINUTES):
+            poll(minute)
+        check(inverter, {"charge": 1, "discharge": 1}, "auto with no curve, first {} minutes".format(CURVE_SEARCH_RETRY_MINUTES))
+        poll(CURVE_SEARCH_RETRY_MINUTES)
+        check(inverter, {"charge": 2, "discharge": 2}, "auto with no curve, after {} minutes".format(CURVE_SEARCH_RETRY_MINUTES))
+
+        # auto, curve found: saved and never searched again
+        curve = {100: 0.5}
+        inverter = setup(auto=True, result=curve)
+        for minute in [0, 1, CURVE_SEARCH_RETRY_MINUTES, 3 * CURVE_SEARCH_RETRY_MINUTES]:
+            poll(minute)
+        check(inverter, {"charge": 1, "discharge": 1}, "auto with a curve found")
+        if my_predbat.battery_charge_power_curve != curve or my_predbat.battery_discharge_power_curve != curve:
+            print("ERROR: auto curves not saved, got charge {} discharge {}".format(my_predbat.battery_charge_power_curve, my_predbat.battery_discharge_power_curve))
+            failed = True
+
+        # not auto, nothing found: searched once, as before
+        inverter = setup(auto=False)
+        for minute in [0, 1, CURVE_SEARCH_RETRY_MINUTES, 3 * CURVE_SEARCH_RETRY_MINUTES]:
+            poll(minute)
+        check(inverter, {"charge": 1, "discharge": 1}, "not auto with no curve")
+    finally:
+        for name, value in saved.items():
+            setattr(my_predbat, name, value)
+        my_predbat.args["num_inverters"] = saved_num_inverters
+    return failed
 
 
 def test_export_target_soc_percent(my_predbat):
@@ -1409,6 +1504,7 @@ def run_execute_tests(my_predbat):
     failed |= test_fetch_inverter_data_extra_pv_sensors(my_predbat)
     failed |= test_fetch_inverter_data_extra_pv_sensors_invalid_value(my_predbat)
     failed |= test_fetch_inverter_data_no_extra_pv_when_sensors_match_inverters(my_predbat)
+    failed |= test_fetch_inverter_data_curve_search_retry(my_predbat)
     if failed:
         return failed
 
