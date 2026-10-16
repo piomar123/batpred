@@ -1,6 +1,6 @@
 # Fork maintenance (piomar123/batpred)
 
-<!-- cspell:ignore piomar rerere worktrees -->
+<!-- cspell:ignore piomar rerere worktrees ziglang -->
 
 This fork carries changes that aren't in upstream Predbat yet. They're kept as one branch each and combined into a generated branch, `patched`, which is what gets deployed.
 
