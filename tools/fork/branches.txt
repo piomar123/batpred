@@ -3,6 +3,6 @@
 # Delete a line once its upstream PR is merged.
 fix/minute-data-same-minute-newest  springfall2008/batpred#5473
 fix/curve-search-retry-throttle     not yet offered upstream
-rebase/net-settlement-main          springfall2008/batpred#5429, rebased; back to feat/net-settlement-window once that is force-pushed
+feat/net-settlement-window          springfall2008/batpred#5429
 local/rate-deadband-2pct            fork-only, never offered upstream
 pr/export-energy-budget             springfall2008/batpred#5538
