@@ -19,7 +19,7 @@
 # has not seen stops the script - resolve it in .worktrees/patched, commit,
 # and run the script again (rerere then remembers the resolution).
 # Kernel binaries are never merged: the script takes either side and rebuilds
-# all six with zig (ZIG=/path/to/zig, version pinned in code-quality.yml).
+# all six with zig 0.16.0 (default ~/.local/opt/zig-0.16.0/zig, or ZIG=/path/to/zig).
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -41,11 +41,16 @@ REPO="$(git rev-parse --show-toplevel)"
 COMMON="$(cd "$REPO" && cd "$(git rev-parse --git-common-dir)" && pwd)"
 MAIN_CHECKOUT="$(dirname "$COMMON")"
 WT="$MAIN_CHECKOUT/.worktrees/patched"
-ZIG="${ZIG:-zig}"
+# zig 0.16.0 (the version code-quality.yml pins): $ZIG, else ~/.local/opt/zig-0.16.0, else zig on the PATH
+ZIG_PINNED="$HOME/.local/opt/zig-0.16.0/zig"
+if [ -z "${ZIG:-}" ]; then
+    if [ -x "$ZIG_PINNED" ]; then ZIG="$ZIG_PINNED"; else ZIG=zig; fi
+fi
 GLUE="fork-glue"
 LOCAL_KERNEL_OFFSET=1000
 
-command -v "$ZIG" >/dev/null 2>&1 || { echo "ERROR: zig not found, set ZIG=/path/to/zig"; exit 1; }
+command -v "$ZIG" >/dev/null 2>&1 || { echo "ERROR: zig not found - install 0.16.0 to ~/.local/opt/zig-0.16.0 or set ZIG=/path/to/zig"; exit 1; }
+[ "$("$ZIG" version)" = "0.16.0" ] || echo "Warn: $ZIG is zig $("$ZIG" version), not the pinned 0.16.0 - binaries may differ from CI builds"
 
 git -C "$REPO" fetch -q origin --tags
 git -C "$REPO" fetch -q --prune fork

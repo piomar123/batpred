@@ -15,9 +15,11 @@ This fork carries changes that aren't in upstream Predbat yet. They're kept as o
 ## Rebuild
 
 ```bash
-ZIG=/path/to/zig-0.16.0/zig tools/fork/rebuild.sh            # build on upstream main and test
-ZIG=... tools/fork/rebuild.sh --push --tag v9.4.0-6-piomar.1 # and publish it
+tools/fork/rebuild.sh                                # build on upstream main and test
+tools/fork/rebuild.sh --push --tag v9.4.1-piomar.2   # and publish it
 ```
+
+The kernel needs zig 0.16.0, the version upstream's CI pins, on the machine that runs the script (not on the Pi). Put the official tarball from ziglang.org, checked against its published SHA-256, in `~/.local/opt/zig-0.16.0/`, or point `ZIG=` at another copy. Homebrew's `zig` follows the latest release, so it's only used as a fallback, with a warning when it isn't 0.16.0.
 
 The script resets `patched` (in the worktree `.worktrees/patched`) to the base, then merges each branch from `branches.txt` with `--no-ff`, then `fork-glue`. Then it gives the kernel local ABI/parity numbers (1000 + upstream's) and rebuilds the six kernel binaries with zig. Last, it runs the full unit test suite and the kernel parity check. `git log --first-parent patched` shows one merge per branch.
 
