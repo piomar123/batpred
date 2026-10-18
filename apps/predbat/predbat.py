@@ -605,6 +605,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.battery_discharge_power_curve_auto = False
         self.computed_charge_curve = False
         self.computed_discharge_curve = False
+        self.charge_curve_last_search = None
+        self.discharge_curve_last_search = None
         self.isCharging = False
         self.isCharging_Target = 0
         self.isExporting = False
