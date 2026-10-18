@@ -1,0 +1,7 @@
+# Branches merged into the fork's `patched` branch, in this order, by tools/fork/rebuild.sh.
+# One branch per line, as named on the fork remote; the rest of the line is a note.
+# Delete a line once its upstream PR is merged.
+fix/curve-search-retry-throttle     not yet offered upstream
+feat/net-settlement-window          springfall2008/batpred#5429
+local/rate-deadband-2pct            fork-only, never offered upstream
+pr/export-energy-budget             springfall2008/batpred#5538
