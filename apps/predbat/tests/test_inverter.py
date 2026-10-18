@@ -989,7 +989,7 @@ def test_adjust_force_export(test_name, ha, inv, dummy_rest, prev_start, prev_en
     return failed
 
 
-def test_adjust_charge_rate(test_name, ha, inv, dummy_rest, prev_rate, rate, expect_rate=None, discharge=False):
+def test_adjust_charge_rate(test_name, ha, inv, dummy_rest, prev_rate, rate, expect_rate=None, discharge=False, expect_percent=None):
     """
     Test the adjust_inverter_mode function
     """
@@ -1004,7 +1004,8 @@ def test_adjust_charge_rate(test_name, ha, inv, dummy_rest, prev_rate, rate, exp
     inv.rest_api = None
     entity = "number.discharge_rate" if discharge else "number.charge_rate"
     entity_percent = "number.discharge_rate_percent" if discharge else "number.charge_rate_percent"
-    expect_percent = int(expect_rate * 100 / inv.battery_rate_max_raw)
+    if expect_percent is None:
+        expect_percent = int(expect_rate * 100 / inv.battery_rate_max_raw)
     ha.dummy_items[entity] = prev_rate
     ha.dummy_items[entity_percent] = int(prev_rate * 100 / inv.battery_rate_max_raw)
     if discharge:
@@ -1431,7 +1432,7 @@ def test_rate_tolerances(test_name, inv):
     print("Test: {}".format(test_name))
     saved = (inv.inv_rate_step_percent_of_capacity, inv.nominal_capacity)
     try:
-        for step_percent, capacity, rate_max_watts, expect in ((0, 13.41, 1300, (65, None)), (1, 13.41, 1300, (65, 135.1)), (1, 13.41, 4000, (200, 200)), (1, 0, 1300, (65, None))):
+        for step_percent, capacity, rate_max_watts, expect in ((0, 13.41, 1300, (26, None)), (1, 13.41, 1300, (26, 135.1)), (1, 13.41, 4000, (80, 135.1)), (1, 0, 1300, (26, None))):
             inv.inv_rate_step_percent_of_capacity = step_percent
             inv.nominal_capacity = capacity
             got = inv.rate_tolerances(rate_max_watts / MINUTE_WATT)
@@ -5858,7 +5859,9 @@ def run_inverter_tests(my_predbat_dummy):
     if failed:
         return failed
     failed |= test_adjust_charge_rate("adjust_charge_rate3", ha, inv, dummy_rest, 200, 0, 0)
-    failed |= test_adjust_charge_rate("adjust_charge_rate4", ha, inv, dummy_rest, 100, 0, 100)
+    # local 2% deadband (52W at 2600W, upstream 5% = 130W), so a 100W drop is written; the percent
+    # entity keeps its own 5-point tolerance, so it stays at 3%
+    failed |= test_adjust_charge_rate("adjust_charge_rate4", ha, inv, dummy_rest, 100, 0, 0, expect_percent=3)
     failed |= test_adjust_charge_rate("adjust_charge_rate5", ha, inv, dummy_rest, 200, 210, 200)
     if failed:
         return failed
