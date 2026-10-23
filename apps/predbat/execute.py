@@ -50,6 +50,10 @@ Execute Predbat plan
 # The precedence lists themselves live in const.py, as output.py's history reconstruction needs the
 # same most-active-first ordering to collapse a slot that changed state part way through (#4843).
 CHARGE_SIDE_STATES = set(CHARGE_STATE_PRECEDENCE)
+# How often an "auto" charge/discharge curve search that found nothing is retried. Each search
+# reads max_days_previous days of four sensors' history, which costs several seconds of CPU, and
+# a new full rate charge to full or discharge to empty appears in that history rarely
+CURVE_SEARCH_RETRY_MINUTES = 60
 EXPORT_SIDE_STATES = set(EXPORT_STATE_PRECEDENCE)
 
 
@@ -1278,6 +1282,14 @@ class Execute:
         self.inverter_needs_reset = False
         self.inverter_needs_reset_force = ""
 
+    def curve_search_due(self, last_search):
+        """
+        Return True when a charge/discharge curve search may run: never run yet, or the last
+        one was at least CURVE_SEARCH_RETRY_MINUTES ago. Without this an "auto" curve that
+        can't be found is searched for on every inverter poll.
+        """
+        return last_search is None or (self.now_utc - last_search) >= timedelta(minutes=CURVE_SEARCH_RETRY_MINUTES)
+
     def fetch_inverter_data(self, quick=False):
         """
         Fetch data about the inverters
@@ -1367,7 +1379,8 @@ class Execute:
                     return False
             inverter.update_status(self.minutes_now, quiet=quick)
 
-            if id == 0 and (not self.computed_charge_curve or self.battery_charge_power_curve_auto) and not self.battery_charge_power_curve:
+            if id == 0 and (not self.computed_charge_curve or self.battery_charge_power_curve_auto) and not self.battery_charge_power_curve and self.curve_search_due(self.charge_curve_last_search):
+                self.charge_curve_last_search = self.now_utc
                 curve = inverter.find_charge_curve(discharge=False)
                 if curve and (self.battery_charge_power_curve_auto or not self.computed_charge_curve):
                     self.log("Saved computed battery charge power curve")
@@ -1382,7 +1395,8 @@ class Execute:
                         # Stop retrying every cycle when not in auto mode and no curve found
                         self.computed_charge_curve = True
 
-            if id == 0 and (not self.computed_discharge_curve or self.battery_discharge_power_curve_auto) and not self.battery_discharge_power_curve:
+            if id == 0 and (not self.computed_discharge_curve or self.battery_discharge_power_curve_auto) and not self.battery_discharge_power_curve and self.curve_search_due(self.discharge_curve_last_search):
+                self.discharge_curve_last_search = self.now_utc
                 curve = inverter.find_charge_curve(discharge=True)
                 if curve and (self.battery_discharge_power_curve_auto or not self.computed_discharge_curve):
                     self.log("Saved computed battery discharge power curve")
