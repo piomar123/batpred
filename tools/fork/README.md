@@ -4,6 +4,23 @@
 
 This fork carries changes that aren't in upstream Predbat yet. They're kept as one branch each and combined into a generated branch, `patched`, which is what gets deployed.
 
+## What's in it
+
+| Change | Upstream | apps.yaml key (absent = upstream behaviour) |
+| --- | --- | --- |
+| Net settlement of import/export within wall-clock windows, for tariffs that net them per hour or quarter-hour before billing (e.g. Polish net-billing) | [#5429](https://github.com/springfall2008/batpred/pull/5429) | `metric_net_settlement_window_minutes` |
+| Export energy budget: only export battery energy that came from PV | [#5538](https://github.com/springfall2008/batpred/pull/5538) | `export_budget_mode` |
+| A failed auto power curve search is retried about hourly instead of on every poll (12-15 s of CPU a minute on a Pi 4) | not offered yet | - |
+| Charge/discharge power deadband 2% instead of 5%, so low-power targets on a ~3.5 kW battery are written | fork-only | - |
+
+The kernel binaries (`apps/predbat/prediction_kernel_lib_*.so`, all six platforms) are rebuilt for this combination with local ABI/parity numbers, so an upstream binary is never loaded against it.
+
+## Installing a release
+
+Releases are the `v<upstream>-piomar.<n>` tags (see [Releases](https://github.com/piomar123/batpred/releases)); use a tag, not the moving `patched` branch. Copy the top-level files of `apps/predbat/` from the tag over the ones in the directory your Predbat runs from (where `predbat.py` is), keeping your `apps.yaml`, and restart Predbat. Turn `auto_update` off (and don't pick a version in Predbat's update selector), or Predbat replaces it with upstream's next release. The log should show `Prediction kernel loaded from ...`; a stale binary only logs a `Warn:` and falls back to Python.
+
+## Branches
+
 | Branch | What it is | How it changes |
 |---|---|---|
 | `main` | exact copy of upstream `main` | fast-forward only (`gh repo sync piomar123/batpred -b main`) |
