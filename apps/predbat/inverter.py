@@ -2229,7 +2229,7 @@ class Inverter:
         """
         (fuzzy, fuzzy_below) in watts for checking a charge/discharge rate read-back against the rate written.
 
-        fuzzy is 5% of rate_max - the rate ceiling, battery_rate_max_charge/discharge per minute. On an
+        fuzzy is 2% of rate_max (local; upstream 5%) - the rate ceiling, battery_rate_max_charge/discharge per minute. On an
         inverter that stores the rate coarsely, fuzzy_below widens a read-back SHORT of the rate to one
         hardware step. GivEnergy holds it as a whole percent of nominal battery capacity, rounded down:
         1300W on a 13.41kWh battery reads back 1206W, a 94W miss that a 1300W ceiling's 65W tolerance
@@ -2242,7 +2242,7 @@ class Inverter:
         above the held rate is taken as already set and the rate stays one step low - the same error the
         rounding makes anyway. The step is only as right as nominal_capacity; GivTCP supplies its own.
         """
-        fuzzy = rate_max * MINUTE_WATT / 20
+        fuzzy = rate_max * MINUTE_WATT / 50  # local: 2% deadband (upstream 5%)
         fuzzy_below = None
         if self.inv_rate_step_percent_of_capacity and self.nominal_capacity:
             step = self.nominal_capacity * 1000 * self.inv_rate_step_percent_of_capacity / 100
