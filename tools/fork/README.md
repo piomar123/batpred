@@ -12,6 +12,7 @@ This fork carries changes that aren't in upstream Predbat yet. They're kept as o
 | Export energy budget: only export battery energy that came from PV | [#5538](https://github.com/springfall2008/batpred/pull/5538) | `export_budget_mode` |
 | A failed auto power curve search is retried about hourly instead of on every poll (12-15 s of CPU a minute on a Pi 4) | not offered yet | - |
 | Charge/discharge power deadband 2% instead of 5%, so low-power targets on a ~3.5 kW battery are written | fork-only | - |
+| Predheat two-zone mode: a second zone with its own thermostat, heat loss and emitters, for heat pumps serving two zones | fork-only | `predheat: two_zone` |
 
 The kernel binaries (`apps/predbat/prediction_kernel_lib_*.so`, all six platforms) are rebuilt for this combination with local ABI/parity numbers, so an upstream binary is never loaded against it.
 
@@ -54,4 +55,4 @@ The script resets `patched` (in the worktree `.worktrees/patched`) to the base, 
 
 ## Known combination
 
-Net settlement (springfall2008/batpred#5429) and the export budget (springfall2008/batpred#5538) both add fields to the end of `PkContext` and both claim ABI 8 / parity 18 upstream. Here, net settlement's fields come first and the export budget's after them, in both `prediction_kernel.cpp` and `prediction_kernel.py`; everywhere else both sides are kept. If the rerere cache is lost, resolve the merge that way again.
+Net settlement (springfall2008/batpred#5429) and the export budget (springfall2008/batpred#5538) both add fields to the end of `PkContext` and both claim ABI 11 / parity 20 upstream (on v9.6.4; before that 8 / 18). Here, net settlement's fields come first and the export budget's after them, in both `prediction_kernel.cpp` and `prediction_kernel.py`; everywhere else both sides are kept. If the rerere cache is lost, resolve the merge that way again.

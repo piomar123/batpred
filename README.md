@@ -2,7 +2,7 @@
 
 > **This is piomar123's fork of [springfall2008/batpred](https://github.com/springfall2008/batpred).**
 > The default branch, `patched`, is upstream Predbat plus a few changes that aren't merged upstream yet
-> (net settlement within wall-clock windows, export energy budget, and two smaller tweaks).
+> (net settlement within wall-clock windows, export energy budget, Predheat two-zone mode, and two smaller tweaks).
 > What they are, the releases and how to install one: [tools/fork/README.md](tools/fork/README.md).
 > Everything below is upstream's README.
 
