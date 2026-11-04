@@ -207,7 +207,7 @@ temperature. The two zones' total is limited to `heat_max_power`, and the electr
 from `heat_pump_efficiency` and `heat_cop`, as in single-zone pump mode. `heat_energy` is the total of both zones;
 `internal_temp` and `target_temp` are the second zone's, and `internal_temp_zone1` and `target_temp_zone1` are added.
 `volume_temp` is not published in this mode. Gas mode and `smart_thermostat` are not supported with `two_zone`; an
-invalid block, or a first zone without history, logs a warning and Predheat falls back to the single-zone model.
+invalid block, a first zone without history, or a first zone whose temperature or target is unavailable at the time, logs a warning (also shown on Predbat's status) and Predheat falls back to the single-zone model.
 
 ### Link Predheat to Predbat
 
