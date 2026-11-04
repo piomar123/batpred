@@ -62,7 +62,8 @@
 // ABI 11: the ten scalar PkResult fields from final_metric to final_carbon_g are returned already
 // rounded to 4dp (round4_fast), and Python no longer rounds them. The layout is unchanged, but a binary
 // from before this returns them unrounded, so it must be refused rather than read.
-#define PK_ABI_VERSION 11
+// ABI 12: PkContext::export_hold_freeze, appended.
+#define PK_ABI_VERSION 12
 // Parity 14: the explicit (mode, target, power) fields replace the packed double throughout the hot
 // loop (see the ABI 6 note); the floor a target exports to now reads the target field, matching
 // prediction.py.
@@ -77,7 +78,9 @@
 // only credit off metric_keep.
 // Parity 19: in PV10, a dispatch minute of a confirmed run (io_credit set) is no longer assumed gone: the
 // dispatch is kept and the non-car import pays PK_RUN_EVERY minutes of each half hour at the worst-case rate.
-#define PK_PARITY_REVISION 19
+// Parity 20: with export_hold_freeze, a target export window that is not force exporting (at/below its
+// target) is modelled as Freeze Export - no charging - instead of Demand.
+#define PK_PARITY_REVISION 20
 #define PK_MAX_CARS 8
 #define PK_RUN_EVERY 5 // const.py RUN_EVERY
 #define PK_EXPORT_MODE_TARGET 0 // const.py EXPORT_MODE_TARGET
@@ -294,6 +297,7 @@ struct PkContext {
     int32_t iboost_on_export;
     int32_t has_rate_gas;
     int32_t has_iboost_plan;
+    int32_t export_hold_freeze; // a target export window at/below its target holds as Freeze Export
 };
 
 // Per-scenario inputs; field order MUST match the ctypes Structure in prediction_kernel.py.
@@ -1248,7 +1252,8 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
             // charge rate to 0 (or pauses charging) and otherwise leaves the inverter in
             // Demand/ECO mode, never touching the discharge rate. So it shares this flow with the
             // charge rate zeroed rather than being modelled by a parallel branch - see #4676.
-            const bool freeze_export = c->set_export_freeze && export_window_active && !pk_export_is_idle(export_mode_now) && (pk_export_is_freeze(export_mode_now) || c->set_export_freeze_only);
+            const bool freeze_export = c->set_export_freeze && export_window_active && !pk_export_is_idle(export_mode_now) &&
+                                       (pk_export_is_freeze(export_mode_now) || c->set_export_freeze_only || (c->export_hold_freeze && export_mode_now == PK_EXPORT_MODE_TARGET));
 
             pv_ac = pv_now * inverter_loss_ac;
             pv_dc = 0;
