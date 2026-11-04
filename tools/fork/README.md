@@ -55,4 +55,4 @@ The script resets `patched` (in the worktree `.worktrees/patched`) to the base, 
 
 ## Known combination
 
-Net settlement (springfall2008/batpred#5429) and the export budget (springfall2008/batpred#5538) both add fields to the end of `PkContext` and both claim ABI 11 / parity 20 upstream (on v9.6.4; before that 8 / 18). Here, net settlement's fields come first and the export budget's after them, in both `prediction_kernel.cpp` and `prediction_kernel.py`; everywhere else both sides are kept. If the rerere cache is lost, resolve the merge that way again.
+Net settlement (springfall2008/batpred#5429) and the export budget (springfall2008/batpred#5538) both add fields to the end of `PkContext` and both claim ABI 11 / parity 20 upstream (on v9.6.5; before v9.6.4 8 / 18). Here, net settlement's fields come first and the export budget's after them, in both `prediction_kernel.cpp` and `prediction_kernel.py`; everywhere else both sides are kept. If the rerere cache is lost, resolve the merge that way again.
