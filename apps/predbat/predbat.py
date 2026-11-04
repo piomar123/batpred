@@ -428,6 +428,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.metric_min_improvement_export_freeze = 0.1
         self.metric_min_improvement_plan = 2.0
         self.export_more_solar = False
+        self.export_hold_freeze = False
         self.export_more_solar_threshold = 1.0
         self.export_more_solar_warned_reason = None
         self.battery_export_permitted = True

@@ -128,6 +128,7 @@ class Prediction(PredictionBatch):
             self.set_reserve_enable = base.set_reserve_enable
             self.set_export_freeze = base.set_export_freeze
             self.set_export_freeze_only = base.set_export_freeze_only
+            self.export_hold_freeze = getattr(base, "export_hold_freeze", False)
             self.set_discharge_during_charge = base.set_discharge_during_charge
             self.set_read_only = base.set_read_only
             self.set_charge_low_power = base.set_charge_low_power
@@ -704,6 +705,7 @@ class Prediction(PredictionBatch):
         set_reserve_enable = self.set_reserve_enable
         set_export_freeze = self.set_export_freeze
         set_export_freeze_only = self.set_export_freeze_only
+        export_hold_freeze = self.export_hold_freeze
         set_charge_window = self.set_charge_window
         set_export_window = self.set_export_window
         battery_rate_max_charge = self.battery_rate_max_charge
@@ -1197,7 +1199,8 @@ class Prediction(PredictionBatch):
                 # parallel branch that has to re-derive the same AC balance. The old duplicate
                 # branch had drifted and pinned battery_draw at 0, wrongly modelling Freeze Export
                 # as Freeze Charge whenever load exceeded PV - see #4676.
-                freeze_export = set_export_freeze and export_window_active and export_mode_now != EXPORT_MODE_IDLE and (export_mode_now == EXPORT_MODE_FREEZE or set_export_freeze_only)
+                # export_hold_freeze: a target window that is not force exporting (at/below its target) holds as Freeze Export
+                freeze_export = set_export_freeze and export_window_active and export_mode_now != EXPORT_MODE_IDLE and (export_mode_now == EXPORT_MODE_FREEZE or set_export_freeze_only or (export_hold_freeze and export_mode_now == EXPORT_MODE_TARGET))
 
                 pv_ac = pv_now * inverter_loss_ac
                 pv_dc = 0
