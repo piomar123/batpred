@@ -171,6 +171,44 @@ Predheat will fill in the gaps between the points provided.
 
 IMPORTANT: The weather compensation curve must have a low value of -20 degrees C and a high value of 20 degrees C. You can have whatever other points you want between the upper and lower bounds and Predheat will fill in the gaps, but if you don't have -20 and 20 Predheat will error when it tries to calculate the weather-adjusted flow temperature.
 
+### Two-zone mode
+
+If your heat pump serves two zones with separate thermostats (for example radiators upstairs and underfloor heating
+downstairs), Predheat can model both. Add a `two_zone` block to the `predheat` section. The existing
+`internal_temperature` and `target_temperature` keep describing the second zone; the first zone gets its own
+entities. Without `two_zone` Predheat runs its normal single-zone model.
+
+```yaml
+  two_zone:
+    coupling_watts: 200          # heat flow between the zones, W per degree of difference
+    zone1:
+      internal_temperature: sensor.zone1_room
+      target_temperature: sensor.zone1_setpoint
+      heating_active: binary_sensor.zone1_pump   # optional, the zone's state at the start of the forecast
+      heat_loss_watts: 156       # W per degree to outside
+      heat_gain_static: 780      # W
+      heat_capacity_kwh: 8.0     # kWh per degree
+      heat_output: 1440          # W, at heat_output_delta
+      heat_output_delta: 14      # degrees of flow minus room; output scales with it
+      hysteresis: 0.0            # stops at target + hysteresis
+      hysteresis_off: 0.6        # starts at target - hysteresis_off
+    zone2:
+      heat_loss_watts: 81
+      heat_gain_static: 930
+      heat_capacity_kwh: 6.5
+      heat_output: 2450          # no heat_output_delta: fixed output while heating
+      hysteresis: 0.26
+      hysteresis_off: 0.2
+```
+
+Each zone has its own thermostat, heat loss, gains and heat capacity. While a zone calls for heat it receives either a
+fixed output or one proportional to the flow temperature (from `weather_compensation`, or `flow_temp`) minus the room
+temperature. The two zones' total is limited to `heat_max_power`, and the electricity is the heat divided by the COP
+from `heat_pump_efficiency` and `heat_cop`, as in single-zone pump mode. `heat_energy` is the total of both zones;
+`internal_temp` and `target_temp` are the second zone's, and `internal_temp_zone1` and `target_temp_zone1` are added.
+`volume_temp` is not published in this mode. Gas mode and `smart_thermostat` are not supported with `two_zone`; an
+invalid block, or a first zone without history, logs a warning and Predheat falls back to the single-zone model.
+
 ### Link Predheat to Predbat
 
 Add a **load_forecast** entry in `apps.yaml` to configure Predbat to use the [Predheat load forecast](apps-yaml.md#load-forecast):
