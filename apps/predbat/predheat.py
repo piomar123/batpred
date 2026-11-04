@@ -20,6 +20,7 @@ requirements and costs for heat pump systems.
 """
 
 from datetime import datetime, timedelta, timezone
+import math
 import pytz
 from utils import str2time, dp2, dp3, minute_data, minutes_since_midnight, next_aligned_run, clock_change_minutes
 from predheat_twozone import parse_two_zone_config, simulate_two_zone
@@ -538,12 +539,26 @@ class PredHeat:
         internal = target = {}
         age_internal = age_target = 0
         if not errors:
+            # A sensor that is unavailable now (and possibly for its whole history, which minute_data would fill
+            # with 0) must not start the forecast: zone 1 would heat from 0C
+            for key in ("internal_temperature", "target_temperature"):
+                entity_id = zones[0][key]
+                state = self.get_state(entity_id=entity_id, default=None)
+                try:
+                    valid = math.isfinite(float(state))
+                except (TypeError, ValueError):
+                    valid = False
+                if not valid:
+                    errors.append("zone1 {} {} is {}".format(key, entity_id, state))
+        if not errors:
             internal, age_internal = self.minute_data_entity(now_utc, "two_zone", smoothing=True, entity_ids=zones[0]["internal_temperature"])
             target, age_target = self.minute_data_entity(now_utc, "two_zone", entity_ids=zones[0]["target_temperature"])
             if not internal or not target:
                 errors = ["no history for zone1 internal_temperature or target_temperature"]
         if errors:
-            self.log("Warn: Predheat: two_zone ignored, running single zone: {}".format("; ".join(errors)))
+            message = "Warn: Predheat: two_zone ignored, running single zone: {}".format("; ".join(errors))
+            self.log(message)
+            self.record_status(message, had_errors=True)
             return
         if self.smart_thermostat:
             self.log("Warn: Predheat: smart_thermostat is not supported with two_zone and is ignored")

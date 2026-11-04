@@ -11,6 +11,7 @@
 
 from predheat_twozone import parse_two_zone_config, simulate_two_zone
 from predheat import PredHeat
+from datetime import datetime, timedelta, timezone
 
 COP_TABLE = {-20: 1.8, -18: 1.88, -16: 1.96, -14: 2.04, -12: 2.12, -10: 2.2, -8: 2.32, -6: 2.44, -4: 2.58, -2: 2.74, 0: 2.9, 2: 3.08, 4: 3.25, 6: 3.65, 8: 4.2, 10: 4.8, 12: 5.2, 14: 5.4, 16: 5.5, 18: 5.5, 20: 5.5}
 WEATHER_COMP = {-20: 45, 7: 35, 20: 35}
@@ -298,10 +299,19 @@ def _two_zone_args(**zone1_overrides):
     return dict(BASE_ARGS, two_zone={"coupling_watts": GOLDEN_CONFIG["coupling_watts"], "zone1": zone1, "zone2": dict(GOLDEN_CONFIG["zone2"])})
 
 
-def _run_update(my_predbat, predheat_args, history=None, states_now=None):
-    """Run PredHeat.update_pred against faked inputs; returns (published states, log lines)."""
+def _run_update(my_predbat, predheat_args, history=None, states_now=None, zone1_room_items=None):
+    """
+    Run PredHeat.update_pred against faked inputs; returns (published states, log lines)
+
+    The current states default to the zone 1 history values and a running zone 1 pump; states_now overrides
+    them. zone1_room_items, when given, are the raw Home Assistant history of sensor.zone1_room, read through
+    the real minute_data_entity. record_status messages are logged as "STATUS: <message>".
+    """
     history = HISTORY if history is None else history
-    states_now = {"binary_sensor.z1_pump": "on"} if states_now is None else states_now
+    current = {name: str(history[name]) for name in ("sensor.zone1_room", "sensor.zone1_target") if name in history}
+    current["binary_sensor.z1_pump"] = "on"
+    current.update(states_now or {})
+    states_now = current
     published = {}
     logs = []
     original_log = my_predbat.log
@@ -316,13 +326,18 @@ def _run_update(my_predbat, predheat_args, history=None, states_now=None):
         predheat.reset()
         predheat.set_state = lambda entity_id, state=None, attributes=None, **kwargs: published.__setitem__(entity_id, (state, attributes or {}))
         predheat.expose_config = lambda *args, **kwargs: None
-        predheat.record_status = lambda *args, **kwargs: None
+        predheat.record_status = lambda message, *args, **kwargs: logs.append("STATUS: {}".format(message))
         predheat.get_state = lambda entity_id=None, default=None, **kwargs: states_now.get(entity_id, default)
         predheat.today_cost = lambda data: 0
+
+        real_minute_data = predheat.minute_data_entity
+        predheat.get_history = lambda entity_id=None, days=30, **kwargs: [list(zone1_room_items)] if entity_id == "sensor.zone1_room" else []
 
         def fake_minute_data(now_utc, key, incrementing=False, smoothing=False, scaling=1.0, entity_ids=None):
             """Constant history for the fake entities, as minute -> value going back three days."""
             name = entity_ids if entity_ids is not None else predheat_args.get(key)
+            if zone1_room_items is not None and name == "sensor.zone1_room":
+                return real_minute_data(now_utc, key, incrementing=incrementing, smoothing=smoothing, scaling=scaling, entity_ids=entity_ids)
             if name not in history:
                 return {}, 0
             return {minute: history[name] for minute in range(0, 3 * 24 * 60)}, 3
@@ -408,14 +423,29 @@ def check_wiring(my_predbat):
     fallbacks = [
         ("a broken two_zone block", dict(BASE_ARGS, two_zone={"zone1": _two_zone_args()["two_zone"]["zone1"]}), HISTORY, "zone2 is missing"),
         ("zone 1 without history", _two_zone_args(), {k: v for k, v in HISTORY.items() if k != "sensor.zone1_room"}, "no history"),
-        ("gas mode", dict(_two_zone_args(), mode="gas"), HISTORY, "mode gas is not supported"),
+        ("gas mode", dict(_two_zone_args(), mode="gas"), HISTORY, "mode gas is not supported", {}, None),
+        ("zone 1's room sensor unavailable now", _two_zone_args(), HISTORY, "zone1 internal_temperature sensor.zone1_room is unavailable", {"sensor.zone1_room": "unavailable"}, None),
+        (
+            "zone 1's room sensor unavailable through its whole history",
+            _two_zone_args(),
+            HISTORY,
+            "zone1 internal_temperature sensor.zone1_room is unavailable",
+            {"sensor.zone1_room": "unavailable"},
+            [{"state": "unavailable", "last_updated": (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()}],
+        ),
+        ("zone 1's target unknown now", _two_zone_args(), HISTORY, "zone1 target_temperature sensor.zone1_target is unknown", {"sensor.zone1_target": "unknown"}, None),
     ]
-    for label, args, history, reason in fallbacks:
+    # "zone 1 without history" is a sensor that exists (it has a state) but has no history yet, like a new template sensor
+    fallbacks[:2] = [fallbacks[0] + ({}, None), fallbacks[1] + ({"sensor.zone1_room": "20.0"}, None)]
+    for label, args, history, reason, states_now, zone1_room_items in fallbacks:
         print("Test: predheat two-zone falls back to single zone with {}".format(label))
-        published, logs = _run_update(my_predbat, args, history=history)
+        published, logs = _run_update(my_predbat, args, history=history, states_now=states_now, zone1_room_items=zone1_room_items)
         warnings = [line for line in logs if line.startswith("Warn: Predheat: two_zone ignored")]
         if not warnings or reason not in warnings[0]:
-            print("  ERROR: expected a 'two_zone ignored' warning naming '{}', got {}".format(reason, logs))
+            print("  ERROR: expected a 'two_zone ignored' warning naming '{}', got {}".format(reason, [line for line in logs if "two_zone" in line]))
+            failed = True
+        if not any(line.startswith("STATUS: Warn: Predheat: two_zone ignored") for line in logs):
+            print("  ERROR: the fallback should also be reported with record_status, got {}".format([line for line in logs if line.startswith("STATUS")]))
             failed = True
         if "predheat.volume_temp" not in published or "predheat.internal_temp_zone1" in published:
             print("  ERROR: expected the single-zone outputs, got {}".format(sorted(published)))
