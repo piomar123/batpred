@@ -740,6 +740,7 @@ triggerable
 trydan
 tunables
 twinx
+twozone
 typecode
 typecodes
 tzdata
