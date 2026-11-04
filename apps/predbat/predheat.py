@@ -22,6 +22,7 @@ requirements and costs for heat pump systems.
 from datetime import datetime, timedelta, timezone
 import pytz
 from utils import str2time, dp2, dp3, minute_data, minutes_since_midnight, next_aligned_run
+from predheat_twozone import parse_two_zone_config, simulate_two_zone
 
 from const import TIME_FORMAT
 
@@ -120,6 +121,7 @@ class PredHeat:
         self.set_state = base.set_state_wrapper
         self.call_service = base.call_service_wrapper
         self.get_history = base.get_history_wrapper
+        self.get_state = base.get_state_wrapper
         self.expose_config = base.expose_config
         self.get_services = base.get_services_wrapper
         self.run_every = base.run_every
@@ -200,11 +202,12 @@ class PredHeat:
             self.log("WARN: Unable to fetch data for {}".format(entity_id))
             self.record_status("Warn - Unable to fetch data from {}".format(entity_id), had_errors=True)
 
-    def minute_data_entity(self, now_utc, key, incrementing=False, smoothing=False, scaling=1.0):
+    def minute_data_entity(self, now_utc, key, incrementing=False, smoothing=False, scaling=1.0, entity_ids=None):
         """
-        Download one or more entities of data
+        Download one or more entities of data, from the predheat key or the given entity_ids
         """
-        entity_ids = self.get_arg(key, indirect=False, domain="predheat", default=None)
+        if entity_ids is None:
+            entity_ids = self.get_arg(key, indirect=False, domain="predheat", default=None)
         if not entity_ids:
             return {}, 0
         if isinstance(entity_ids, str):
@@ -510,6 +513,132 @@ class PredHeat:
             self.set_state(self.prefix + ".cost_h8", state=dp2(cost_minute[60 * 8]), attributes={"friendly_name": "Predicted cost +8hrs", "state_class": "measurement", "unit_of_measurement": "p"})
         return next_volume_temp, internal_temp_predict_minute
 
+    def zone_heating_active(self, zone):
+        """
+        Whether a zone's optional heating_active entity says it is heating now (anything but on/true counts as not)
+        """
+        entity_id = zone.get("heating_active")
+        if not entity_id:
+            return False
+        return str(self.get_state(entity_id=entity_id, default="off")).lower() in ("on", "true")
+
+    def load_two_zone(self, now_utc):
+        """
+        Read the optional two_zone block and zone 1's history into self.two_zone (None runs single zone)
+        """
+        self.two_zone = None
+        config = self.get_arg("two_zone", None, indirect=False, domain="predheat")
+        if not config:
+            return
+        zones, coupling, errors = parse_two_zone_config(config)
+        if not errors and self.mode == "gas":
+            errors = ["mode gas is not supported"]
+        internal = target = {}
+        age_internal = age_target = 0
+        if not errors:
+            internal, age_internal = self.minute_data_entity(now_utc, "two_zone", smoothing=True, entity_ids=zones[0]["internal_temperature"])
+            target, age_target = self.minute_data_entity(now_utc, "two_zone", entity_ids=zones[0]["target_temperature"])
+            if not internal or not target:
+                errors = ["no history for zone1 internal_temperature or target_temperature"]
+        if errors:
+            self.log("Warn: Predheat: two_zone ignored, running single zone: {}".format("; ".join(errors)))
+            return
+        if self.smart_thermostat:
+            self.log("Warn: Predheat: smart_thermostat is not supported with two_zone and is ignored")
+        self.minute_data_age = min(self.minute_data_age, age_internal, age_target)
+        heating = [self.zone_heating_active(zone) for zone in zones]
+        self.two_zone = {"zones": zones, "coupling": coupling, "internal": internal, "target": target, "heating": heating}
+        self.log(
+            "Predheat: two_zone enabled, zone1 internal temp {} target {} heating {}, zone2 heating {}, coupling {} W per degree, {} days of history".format(
+                dp3(internal.get(0, 0)), dp2(target.get(0, 0)), heating[0], heating[1], coupling, self.minute_data_age
+            )
+        )
+
+    def run_simulation_two_zone(self):
+        """
+        Run the two-zone model (predheat_twozone.py) over the forecast and publish it
+
+        Same outputs as run_simulation with zone 2 in internal_temp/target_temp/heat_to_temp and the total of both
+        zones in heat_energy and cost, plus internal_temp_zone1 and target_temp_zone1; no volume_temp.
+        """
+        two_zone = self.two_zone
+        last_external = [self.external_temperature[0]]
+
+        def external(minute):
+            """Forecast outside temperature, holding the last known value where the forecast has a gap."""
+            last_external[0] = self.temperatures.get(minute, last_external[0])
+            return last_external[0]
+
+        def target_zone1(minute):
+            """Zone 1's target replayed from its history, like zone 2's."""
+            return self.get_historical(two_zone["target"], minute, default=20.0)
+
+        def target_zone2(minute):
+            """Zone 2's target replayed from its history."""
+            return self.get_historical(self.target_temperature, minute, default=20.0)
+
+        def flow_temp(out_temp):
+            """Flow temperature for an outside temperature, as in run_simulation."""
+            if self.weather_compensation_enabled:
+                return self.weather_compensation.get(out_temp, self.flow_temp)
+            return self.flow_temp
+
+        def cop(out_temp):
+            """Effective COP: heat_cop scaled by the efficiency table, as in run_simulation's pump mode."""
+            return self.heat_cop * self.heat_pump_efficiency.get(out_temp, self.heat_pump_efficiency_max) / self.heat_pump_efficiency_max
+
+        start = (two_zone["internal"].get(0, self.internal_temperature[0]), self.internal_temperature[0])
+        result = simulate_two_zone(two_zone["zones"], two_zone["coupling"], start, two_zone["heating"], external, (target_zone1, target_zone2), flow_temp, cop, self.heat_max_power, self.forecast_days * 24 * 60, PREDICT_STEP)
+
+        heat_energy = self.heat_energy_today
+        cost = self.import_today_cost
+        stamps = {name: {} for name in ("internal", "internal_zone1", "external", "target", "target_zone1", "heat_to", "energy", "cost")}
+        minutes = {name: {} for name in ("internal", "internal_zone1", "target", "target_zone1", "heat_to", "energy", "cost")}
+        energy_today_external = []
+        for index, minute in enumerate(result["minute"]):
+            minute_absolute = minute + self.minutes_now
+            energy_now = result["electric_watts"][index] * PREDICT_STEP / 60.0 / 1000.0
+            heat_energy += energy_now
+            cost += energy_now * self.rate_import.get(minute_absolute, 0)
+            values = {
+                "internal": result["temp"][1][index],
+                "internal_zone1": result["temp"][0][index],
+                "target": result["target"][1][index],
+                "target_zone1": result["target"][0][index],
+                "heat_to": result["target"][1][index] if result["heating"][1][index] else 0,
+                "energy": heat_energy,
+                "cost": cost,
+            }
+            if (minute % 10) == 0:
+                stamp = (self.midnight_utc + timedelta(seconds=60 * minute_absolute)).strftime(TIME_FORMAT)
+                for name, value in values.items():
+                    stamps[name][stamp] = dp2(value)
+                stamps["external"][stamp] = dp2(result["external"][index])
+                energy_today_external.append({"last_updated": stamp, "energy": dp2(heat_energy)})
+            for name, value in values.items():
+                minutes[name][minute] = dp2(value)
+
+        prefix = self.prefix
+        celsius = {"state_class": "measurement", "unit_of_measurement": "°C"}
+        self.set_state(prefix + ".internal_temp", state=dp2(self.internal_temperature[0]), attributes=dict(celsius, results=stamps["internal"], friendly_name="Internal Temperature Predicted"))
+        self.set_state(prefix + ".internal_temp_zone1", state=dp2(start[0]), attributes=dict(celsius, results=stamps["internal_zone1"], friendly_name="Zone 1 Internal Temperature Predicted"))
+        self.set_state(prefix + ".external_temp", state=dp2(self.external_temperature[0]), attributes=dict(celsius, results=stamps["external"], friendly_name="External Temperature Predicted"))
+        self.set_state(prefix + ".target_temp", state=dp2(minutes["target"][0]), attributes=dict(celsius, results=stamps["target"], friendly_name="Target Temperature Predicted"))
+        self.set_state(prefix + ".target_temp_zone1", state=dp2(minutes["target_zone1"][0]), attributes=dict(celsius, results=stamps["target_zone1"], friendly_name="Zone 1 Target Temperature Predicted"))
+        self.set_state(prefix + ".heat_to_temp", state=dp2(minutes["heat_to"][0]), attributes=dict(celsius, results=stamps["heat_to"], friendly_name="Predict heating to target"))
+        for hours, label in ((1, "+1hr"), (2, "+2hr"), (8, "+8hrs")):
+            self.set_state(prefix + ".internal_temp_h{}".format(hours), state=minutes["internal"][60 * hours], attributes=dict(celsius, friendly_name="Internal Temperature Predicted {}".format(label)))
+        self.set_state(
+            prefix + ".heat_energy",
+            state=self.heat_energy_today,
+            attributes={"external": energy_today_external, "results": stamps["energy"], "friendly_name": "Predict heating energy", "state_class": "measurement", "unit_of_measurement": "kWh"},
+        )
+        for hours, label in ((1, "+1hr"), (2, "+2hrs"), (8, "+8hrs")):
+            self.set_state(prefix + ".heat_energy_h{}".format(hours), state=minutes["energy"][60 * hours], attributes={"friendly_name": "Predict heating energy {}".format(label), "state_class": "measurement", "unit_of_measurement": "kWh"})
+        self.set_state(prefix + ".cost", state=dp2(cost), attributes={"results": stamps["cost"], "friendly_name": "Predicted cost", "state_class": "measurement", "unit_of_measurement": "p"})
+        for hours, label in ((1, "+1hr"), (2, "+2hrs"), (8, "+8hrs")):
+            self.set_state(prefix + ".cost_h{}".format(hours), state=minutes["cost"][60 * hours], attributes={"friendly_name": "Predicted cost {}".format(label), "state_class": "measurement", "unit_of_measurement": "p"})
+
     def today_cost(self, import_today):
         """
         Work out energy costs today (approx)
@@ -608,6 +737,7 @@ class PredHeat:
         self.smart_thermostat_max_minutes = self.get_smart_thermostat_max_minutes()
         self.heating_active = self.get_arg("heating_active", False, domain="predheat")
         self.next_volume_temp = self.get_arg("volume_temp", self.get_arg("next_volume_temp", self.internal_temperature[0]))
+        self.load_two_zone(now_utc)
 
         self.log("Predheat: Hysteresis On {} off {} heat loss {} W heat loss {} W per degree".format(self.hysteresis_on, self.hysteresis_off, self.heat_loss_watts, self.heat_loss_degrees))
         self.log(
@@ -627,12 +757,15 @@ class PredHeat:
         self.import_today_cost = self.today_cost(self.heating_energy)
 
         # Run sim
-        next_volume_temp, predict_minute = self.run_simulation(self.next_volume_temp, self.heating_active)
-        next_volume_temp, predict_minute = self.run_simulation(self.next_volume_temp, self.heating_active, last_predict_minute=predict_minute, save="best")
-        if scheduled:
-            # Update state
-            self.next_volume_temp = next_volume_temp
-            self.expose_config("next_volume_temp", dp3(self.next_volume_temp))
+        if self.two_zone:
+            self.run_simulation_two_zone()
+        else:
+            next_volume_temp, predict_minute = self.run_simulation(self.next_volume_temp, self.heating_active)
+            next_volume_temp, predict_minute = self.run_simulation(self.next_volume_temp, self.heating_active, last_predict_minute=predict_minute, save="best")
+            if scheduled:
+                # Update state
+                self.next_volume_temp = next_volume_temp
+                self.expose_config("next_volume_temp", dp3(self.next_volume_temp))
 
         if self.had_errors:
             self.log("Predheat: completed run status {} with Errors reported (check log)".format(status))
