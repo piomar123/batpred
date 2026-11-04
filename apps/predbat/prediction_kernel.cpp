@@ -59,7 +59,8 @@
 // export_end_soc_out within one call.
 // ABI 11: PkContext gained metric_net_settlement_window and the net_seed_* fields at the end.
 // ABI 11: PkContext gained export_budget_mode, export_budget_cap and the export budget seed at the end.
-#define PK_ABI_VERSION 11
+// Fork (tools/fork/rebuild.sh): local ABI 1011 = 1000 + 11 for this combination of branches.
+#define PK_ABI_VERSION 1011
 // Parity 14: the explicit (mode, target, power) fields replace the packed double throughout the hot
 // loop (see the ABI 6 note); the floor a target exports to now reads the target field, matching
 // prediction.py.
@@ -79,7 +80,8 @@
 // current window starts from the already-metered net_seed_* totals handed over by today_cost.
 // Parity 20: optional export energy budget (export_budget_mode) caps forced battery export, mirroring
 // export_budget.py; a capped step recomputes the grid balance before the iBoost solar excess.
-#define PK_PARITY_REVISION 20
+// Fork (tools/fork/rebuild.sh): local parity 1020 = 1000 + 20.
+#define PK_PARITY_REVISION 1020
 #define PK_MAX_CARS 8
 #define PK_RUN_EVERY 5 // const.py RUN_EVERY
 #define PK_EXPORT_MODE_TARGET 0 // const.py EXPORT_MODE_TARGET
