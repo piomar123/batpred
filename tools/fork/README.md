@@ -13,6 +13,7 @@ This fork carries changes that aren't in upstream Predbat yet. They're kept as o
 | A failed auto power curve search is retried about hourly instead of on every poll (12-15 s of CPU a minute on a Pi 4) | not offered yet | - |
 | Charge/discharge power deadband 2% instead of 5%, so low-power targets on a ~3.5 kW battery are written | fork-only | - |
 | Predheat two-zone mode: a second zone with its own thermostat, heat loss and emitters, for heat pumps serving two zones | fork-only | `predheat: two_zone` |
+| A target export window that has reached its target holds as Freeze Export instead of Demand, so PV can't charge the battery over the target and set off a full-power export back down to it | not offered yet | `export_hold_freeze` |
 
 The kernel binaries (`apps/predbat/prediction_kernel_lib_*.so`, all six platforms) are rebuilt for this combination with local ABI/parity numbers, so an upstream binary is never loaded against it.
 
@@ -55,4 +56,4 @@ The script resets `patched` (in the worktree `.worktrees/patched`) to the base, 
 
 ## Known combination
 
-Net settlement (springfall2008/batpred#5429) and the export budget (springfall2008/batpred#5538) both add fields to the end of `PkContext` and both claim ABI 11 / parity 20 upstream (on v9.6.5; before v9.6.4 8 / 18). Here, net settlement's fields come first and the export budget's after them, in both `prediction_kernel.cpp` and `prediction_kernel.py`; everywhere else both sides are kept. If the rerere cache is lost, resolve the merge that way again.
+Net settlement (springfall2008/batpred#5429) and the export budget (springfall2008/batpred#5538) both add fields to the end of `PkContext` and both claim ABI 11 / parity 20 upstream (on v9.6.5; before v9.6.4 8 / 18). Here, net settlement's fields come first and the export budget's after them, in both `prediction_kernel.cpp` and `prediction_kernel.py`; everywhere else both sides are kept. `feat/export-hold-freeze` appends `export_hold_freeze` to `PkContext` too (also ABI 11 / parity 20 upstream); it goes last, after the export budget's fields. If the rerere cache is lost, resolve the merge that way again.
