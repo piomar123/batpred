@@ -227,6 +227,49 @@ def test_replay_measured_soc():
     return failed
 
 
+def test_replay_meter_ticks():
+    """Coarse SoC and load meter ticks: battery output the house used, split unevenly across steps, is house use, not a loss"""
+    failed = False
+    # 1 kWh PV charge and 2 kWh grid charge, then the battery runs a steady 0.1 kWh/step house: the SoC meter shows
+    # 0.15, 0.05, ... (0.6 kWh, all of it the house's). The extra 0.05 in a step is matched against the next step's
+    # unserved 0.05, so only the grid part pays: PV 1.0, grid 1.4
+    pv = [1.0, 0.0] + [0.0] * 6
+    imp = [0.0, 2.0] + [0.0] * 6
+    load = [0.0, 0.0] + [0.1] * 6
+    soc = [1.0, 2.0] + [-0.15, -0.05] * 3
+    zero = [0.0] * 8
+    seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
+    failed = check(failed, close(seed[1], 1.0 / 2.4) and close(noncompliant, 0.0), "meter ticks, output ahead of load {} {}".format(seed, noncompliant))
+    # The other way round (the load meter ticks first): unserved load waits for the later SoC drop
+    soc = [1.0, 2.0] + [-0.05, -0.15] * 3
+    seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
+    failed = check(failed, close(seed[1], 1.0 / 2.4) and close(noncompliant, 0.0), "meter ticks, load ahead of output {} {}".format(seed, noncompliant))
+    # Unserved load carried is capped: 3 steps of a 0.1 kWh house the battery runs (no import) while the SoC meter
+    # doesn't move, then a 0.3 kWh drop. Only 0.25 kWh counts as house use, the other 0.05 is a loss from the PV part
+    pv = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    imp = [0.0, 2.0, 0.0, 0.0, 0.0, 0.0]
+    load = [0.0, 0.0, 0.1, 0.1, 0.1, 0.0]
+    soc = [1.0, 2.0, 0.0, 0.0, 0.0, -0.3]
+    zero = [0.0] * 6
+    seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
+    failed = check(failed, close(seed[1], 0.95 / 2.7), "meter ticks, carry cap {} {}".format(seed, noncompliant))
+    # Load the grid met while the battery idled is not unserved: a later 0.3 kWh drop is all loss, from the PV part
+    imp = [0.0, 2.0, 1.0, 1.0, 1.0, 0.0]
+    load = [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+    seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
+    failed = check(failed, close(seed[1], 0.7 / 2.7), "meter ticks, grid-fed load is not unserved {} {}".format(seed, noncompliant))
+    # A drop left unmatched for the carry window is a loss even if load turns up later: 0.05 unexplained, 7 quiet
+    # steps (35 minutes), then 0.05 of unserved load
+    pv = [1.0, 0.0] + [0.0] * 9
+    imp = [0.0, 2.0] + [0.0] * 9
+    load = [0.0, 0.0, 0.0] + [0.0] * 7 + [0.05]
+    soc = [1.0, 2.0, -0.05] + [0.0] * 7 + [0.0]
+    zero = [0.0] * 11
+    seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
+    failed = check(failed, close(seed[1], 0.95 / 2.95), "meter ticks, carry window {} {}".format(seed, noncompliant))
+    return failed
+
+
 def test_replay_skips_counter_glitch():
     """A counter reset pair (+300 then -300 kWh) is skipped, not counted"""
     failed = False
@@ -713,6 +756,7 @@ def run_export_budget_tests(my_predbat):
     failed |= test_replay()
     failed |= test_replay_skips_counter_glitch()
     failed |= test_replay_measured_soc()
+    failed |= test_replay_meter_ticks()
     from tests.test_kernel_parity import snapshot_scenario_state, restore_scenario_state
 
     state = snapshot_scenario_state(my_predbat)
