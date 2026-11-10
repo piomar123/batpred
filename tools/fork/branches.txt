@@ -5,5 +5,6 @@ fix/curve-search-retry-throttle     not yet offered upstream
 feat/net-settlement-window          springfall2008/batpred#5429
 local/rate-deadband-2pct            fork-only, never offered upstream
 pr/export-energy-budget             springfall2008/batpred#5538
+fix/export-budget-window-floor      on trial on the Pi, then into #5538 (based on pr/export-energy-budget)
 feat/predheat-two-zone              fork-only, Predheat two-zone mode
 feat/export-hold-freeze             not yet offered upstream
