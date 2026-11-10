@@ -4592,6 +4592,28 @@ def run_execute_tests(my_predbat):
         assert_immediate_soc_target=90,
         has_timed_pause=False,
     )
+    # export_hold_freeze: a target export window already at or below its target holds as Freeze Export
+    # instead of Demand, so PV can't charge the battery 1% over the target and trigger a full-power
+    # export burst back down to it every ~10 minutes
+    export_limits_best_hold = [pack_export_limit(EXPORT_MODE_TARGET, 95)]
+    hold_kwargs = dict(export_window_best=export_window_best2, export_limits_best=export_limits_best_hold, assert_force_export=False, set_charge_window=True, set_export_window=True, soc_kw=9, has_timed_pause=False)
+    failed |= run_execute_test(my_predbat, "discharge_hold_demand", assert_status="Hold exporting", assert_immediate_soc_target=95, **hold_kwargs)
+    my_predbat.export_hold_freeze = True
+    failed |= run_execute_test(my_predbat, "discharge_hold_freeze", assert_status="Freeze exporting", assert_pause_charge=False, assert_charge_rate=0, assert_immediate_soc_target=90, **hold_kwargs)
+    failed |= run_execute_test(
+        my_predbat,
+        "discharge_hold_freeze_above_target",
+        assert_status="Exporting",
+        assert_force_export=True,
+        soc_kw=9.8,
+        assert_immediate_soc_target=95,
+        assert_discharge_start_time_minutes=my_predbat.minutes_now,
+        assert_discharge_end_time_minutes=my_predbat.minutes_now + 90 + 1,
+        **{k: v for k, v in hold_kwargs.items() if k not in ("soc_kw", "assert_force_export")},
+    )
+    my_predbat.export_hold_freeze = False
+    if failed:
+        return failed
     # Freeze exporting is not a force export: discharge stays live in demand, so a car slot must
     # still hold the battery (discharge rate 0, reserve pinned at SoC+1) rather than drain into the car (#5612)
     failed |= run_execute_test(
