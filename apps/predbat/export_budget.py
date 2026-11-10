@@ -30,6 +30,12 @@ EXPORT_BUDGET_MODE_NAMES = {"off": EXPORT_BUDGET_OFF, "pv_origin": EXPORT_BUDGET
 EXPORT_BUDGET_REPLAY_DAYS = 7
 # A 5 minute meter delta above this (240 kW) is a counter glitch, not energy
 EXPORT_BUDGET_MAX_STEP_KWH = 20.0
+# The SoC and load meters tick in coarse steps (e.g. 1% of the battery, 0.1 kWh), so in one 5 minute step the battery
+# can seem to give more than the house used and in the next less. The replay matches the two across this many minutes,
+# carrying at most this much house load the battery seemed to leave unserved (load the meters say neither PV nor the
+# grid met), before it counts the rest as a loss
+EXPORT_BUDGET_CARRY_MINUTES = 30
+EXPORT_BUDGET_CARRY_KWH = 0.25
 
 
 def parse_export_budget_mode(value):
@@ -135,8 +141,11 @@ def export_budget_replay(mode, pv_today, export_today, import_today, load_minute
 
     pv_origin labels battery flow per step. With soc_history (stored kWh keyed by minutes ago) the flow is the
     measured SoC change, starting from the stored energy at the start of the window counted as grid; a drop the
-    house and the meter do not explain (losses, BMS resync) comes off the PV part first. Without it the flow is
-    estimated as PV + import - export - load, which reads conversion losses as charge, so it is only a fallback.
+    house and the meter do not explain (losses, BMS resync) comes off the PV part first. Because the meters tick
+    in coarse steps, such a drop is first matched against house load the battery seemed to leave unserved within
+    EXPORT_BUDGET_CARRY_MINUTES (either side, up to EXPORT_BUDGET_CARRY_KWH of it), and only what is left is a loss.
+    Without SoC history the flow is estimated as PV + import - export - load, which reads conversion losses as
+    charge, so it is only a fallback.
     Only the PV share of the stored energy is kept; the prediction applies it to the real SoC.
     """
     series = [pv_today, export_today]
@@ -155,7 +164,40 @@ def export_budget_replay(mode, pv_today, export_today, import_today, load_minute
     grid_part = soc_history.get(available, 0.0) if use_soc else 0.0
     noncompliant = 0.0
     steps = 0
+    # Coarse meter ticks: house load the battery seemed to leave unserved, and battery output the house and the
+    # export meter seemed not to take, each as [minutes ago, kWh] oldest first (see EXPORT_BUDGET_CARRY_MINUTES)
+    unserved = []
+    unexplained_pending = []
+
+    def take_carry(carry, amount):
+        """Remove up to amount kWh from the oldest carry entries, returns how much was taken"""
+        taken = 0.0
+        while carry and taken < amount:
+            use = min(carry[0][1], amount - taken)
+            taken += use
+            carry[0][1] -= use
+            if carry[0][1] <= 1e-9:
+                carry.pop(0)
+        return taken
+
+    def book_house(parts, kwh):
+        """Battery output that served the house: from the grid part first"""
+        pv_part, grid_part = parts
+        from_grid = min(grid_part, kwh)
+        return max(pv_part - (kwh - from_grid), 0.0), grid_part - from_grid
+
+    def book_loss(parts, kwh):
+        """Battery output nothing explains (losses, BMS resync): from the PV part first"""
+        pv_part, grid_part = parts
+        from_pv = min(pv_part, kwh)
+        return pv_part - from_pv, max(grid_part - (kwh - from_pv), 0.0)
+
     for ago in range(available - step, -1, -step):
+        if use_soc:
+            while unexplained_pending and unexplained_pending[0][0] - ago >= EXPORT_BUDGET_CARRY_MINUTES:
+                pv_part, grid_part = book_loss((pv_part, grid_part), unexplained_pending.pop(0)[1])
+            while unserved and unserved[0][0] - ago >= EXPORT_BUDGET_CARRY_MINUTES:
+                unserved.pop(0)
         pv = _replay_delta(pv_today, ago, step)
         exported = _replay_delta(export_today, ago, step)
         if pv is None or exported is None:
@@ -178,8 +220,8 @@ def export_budget_replay(mode, pv_today, export_today, import_today, load_minute
                 pv_in = min(flow, pv)
                 pv_part += pv_in
                 grid_part += flow - pv_in
-            elif flow < 0:
-                out = -flow
+            elif flow < 0 or (use_soc and load > 0):
+                out = -flow if flow < 0 else 0.0
                 house = export_budget_house_from_battery(mode, out, load, pv)
                 to_grid = out - house
                 unexplained = 0.0
@@ -187,22 +229,37 @@ def export_budget_replay(mode, pv_today, export_today, import_today, load_minute
                     # The meter bounds what can have left for the grid; the rest is loss or a SoC resync
                     unexplained = max(to_grid - exported, 0.0)
                     to_grid -= unexplained
-                from_grid = min(grid_part, house)
-                grid_part -= from_grid
-                pv_part = max(pv_part - (house - from_grid), 0.0)
+                pv_part, grid_part = book_house((pv_part, grid_part), house)
                 from_pv = min(pv_part, to_grid)
                 pv_part -= from_pv
                 excess = to_grid - from_pv
                 noncompliant += excess
                 grid_part = max(grid_part - excess, 0.0)
-                from_pv = min(pv_part, unexplained)
-                pv_part -= from_pv
-                grid_part = max(grid_part - (unexplained - from_pv), 0.0)
+                if use_soc:
+                    # Match this step's unexplained output and unserved load against the other side's carry: a match is
+                    # the house's own use split across two meter ticks, so it is booked as house use, not a loss
+                    matched = take_carry(unserved, unexplained)
+                    pv_part, grid_part = book_house((pv_part, grid_part), matched)
+                    if unexplained - matched > 1e-9:
+                        unexplained_pending.append([ago, unexplained - matched])
+                    # Unserved only where the meters say the battery ran the house (load not met by PV or import),
+                    # not while it idled and the house imported
+                    needed = min(max(load + exported - pv - imported, 0.0), max(load, 0.0))
+                    spare = max(needed - house, 0.0)
+                    matched = take_carry(unexplained_pending, spare)
+                    pv_part, grid_part = book_house((pv_part, grid_part), matched)
+                    if spare - matched > 1e-9:
+                        unserved.append([ago, spare - matched])
+                        while sum(entry[1] for entry in unserved) > EXPORT_BUDGET_CARRY_KWH:
+                            take_carry(unserved, sum(entry[1] for entry in unserved) - EXPORT_BUDGET_CARRY_KWH)
             total = pv_part + grid_part
             if soc_max > 0 and total > soc_max:
                 pv_part *= soc_max / total
                 grid_part *= soc_max / total
         steps += 1
+    # Output still waiting for a match when the history ends counts as a loss, so the budget is never overstated
+    for _, kwh in unexplained_pending:
+        pv_part, grid_part = book_loss((pv_part, grid_part), kwh)
     if steps == 0:
         return None, 0.0, 0
     if mode == EXPORT_BUDGET_PV_EQUIVALENT:
