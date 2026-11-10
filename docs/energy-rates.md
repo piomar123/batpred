@@ -802,7 +802,10 @@ When the budget runs out during an export window the battery keeps covering the 
 export stops. Manual forced exports are limited too; set the mode to `off` to export without it.
 Because the inverter exports at full power down to a window's target SoC, every cycle Predbat raises
 the target of the export running now to at least the measured SoC minus the energy the budget still
-allows (rounded up to a whole percent).
+allows (rounded up to a whole percent). The battery covering the house doesn't spend the budget, so
+that floor falls as the house draws the battery down: the plan's target is the lowest floor any step
+of the window reaches, and the export steps down to it over several cycles, each one within the budget
+measured at the time.
 
 Each cycle Predbat replays up to the last 7 days of `pv_today`, `export_today`, `import_today` and
 `load_today` history to find where the budget stands. It uses the history already loaded for load

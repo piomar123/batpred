@@ -611,6 +611,17 @@ def test_clip_budget_floor(my_predbat):
         if export_target_of(limits[0]) != expect_limit or windows[0]["target"] != expect_target:
             print("ERROR: export_budget clip floor mode {} exportable {} gave target {} window {} expected {} / {}".format(mode, exportable, export_target_of(limits[0]), windows[0]["target"], expect_limit, expect_target))
             failed = True
+    # The house draws the SoC down without spending the budget, so the floor falls during the window: the plan keeps
+    # the lowest floor any step reaches (25 minutes in: 5.5 kWh - 0.2 kWh -> 53%), not the start's (78%)
+    for mode, expect in ((1, 53), (2, 53)):
+        my_predbat.export_budget_mode = mode
+        windows = [{"start": minutes_now, "end": minutes_now + 30, "average": 50.0}]
+        limits = [pack_export_limit(EXPORT_MODE_TARGET, 0, 1.0)]
+        budget = {minute: 0.2 for minute in predict_soc}
+        _, limits = my_predbat.clip_export_slots(minutes_now, predict_soc, windows, limits, 1, 5, budget_exportable=budget)
+        if export_target_of(limits[0]) != expect or windows[0]["target"] != expect:
+            print("ERROR: export_budget clip floor over the window mode {} gave target {} window {} expected {}".format(mode, export_target_of(limits[0]), windows[0]["target"], expect))
+            failed = True
     my_predbat.export_budget_mode = 0
     return failed
 
