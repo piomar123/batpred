@@ -822,13 +822,16 @@ When the budget runs out during an export window the battery keeps covering the 
 export stops. Manual forced exports are limited too; set the mode to `off` to export without it.
 Because the inverter exports at full power down to a window's target SoC, every cycle Predbat raises
 the target of the export running now to at least the measured SoC minus the energy the budget still
-allows (rounded up to a whole percent).
+allows (rounded up to a whole percent). The battery covering the house doesn't spend the budget, so
+that floor falls as the house draws the battery down: the plan's target is the lowest floor any step
+of the window reaches, and the export steps down to it over several cycles, each one within the budget
+measured at the time.
 
 Each cycle Predbat replays up to the last 7 days of `pv_today`, `export_today`, `import_today` and
 `load_today` history to find where the budget stands. It uses the history already loaded for load
 prediction, so the replay is shorter when [days_previous](apps-yaml.md#days_previous) covers fewer
 days (`history_steps` on the sensor shows how many 5 minute steps were replayed). For `pv_origin` it also reads 7 days of the
-battery's `soc_percent` (or `soc_kw`) history, so conversion losses are not mistaken for PV charge;
+battery's `soc_percent` (or `soc_kw`) history, so conversion losses are not mistaken for PV charge (the SoC and load meters tick in coarse steps, so battery output and house load are matched across up to 30 minutes before a difference counts as a loss, which comes out of the PV and grid parts in proportion);
 without that history it estimates the battery flow and logs a warning. It publishes `predbat.export_budget`
 (exportable kWh now, with `planned_battery_export_kwh` and `noncompliant_export_kwh` - export in the
 replayed history the rule would not have allowed). Its `results` attribute holds the budget over the

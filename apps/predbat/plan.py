@@ -4007,10 +4007,16 @@ class Plan:
                             self.log("Clip up export window {} from {} - {} from limit {} to new limit {} target set to {}".format(window_n, window_start, window_end, limit, export_limits_best[window_n], window["target"]))
 
                     # Export energy budget: the inverter force exports at full power down to the target, and the battery
-                    # also covers the house meanwhile, so a target below the start SoC minus the exportable budget could
-                    # sell more than the budget allows. Never command below that floor; rounded up so it never allows more.
-                    if self.export_budget_mode and budget_exportable is not None and export_mode_of(limit) == EXPORT_MODE_TARGET and predict_minute_start in budget_exportable:
-                        floor_percent = export_budget_floor_percent(predict_soc[predict_minute_start], budget_exportable[predict_minute_start], self.soc_max)
+                    # also covers the house meanwhile, so a target below the SoC minus the exportable budget could sell
+                    # more than the budget allows. The house is served without spending the budget, so that floor falls
+                    # during the window as the house draws the battery down; the plan keeps the lowest floor any step
+                    # reaches, and apply_export_budget_floor holds each cycle at the floor measured then, so the export
+                    # steps down to it in compliant stages. Rounded up so it never allows more.
+                    budget_steps = []
+                    if self.export_budget_mode and budget_exportable is not None and export_mode_of(limit) == EXPORT_MODE_TARGET:
+                        budget_steps = [minute for minute in range(predict_minute_start, max(predict_minute_end, predict_minute_start + 5), 5) if minute in budget_exportable and minute in predict_soc]
+                    if budget_steps:
+                        floor_percent = min(export_budget_floor_percent(predict_soc[minute], budget_exportable[minute], self.soc_max) for minute in budget_steps)
                         current = export_limits_best[window_n]
                         if floor_percent > (export_target_of(current) or 0):
                             export_limits_best[window_n] = pack_export_limit(EXPORT_MODE_TARGET, floor_percent, export_power_of(current))
