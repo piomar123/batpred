@@ -211,13 +211,14 @@ def test_replay_measured_soc():
     # Without SoC history the loss is read as PV charge (the fallback); with it the stored energy stays all grid
     failed = check(failed, seed_flow[1] > 0.01, "flow fallback should show the loss as PV charge {}".format(seed_flow))
     failed = check(failed, steps == 18 and close(seed[1], 0.0) and close(noncompliant, 0.0), "measured SoC phantom charge {} {} {}".format(seed, noncompliant, steps))
-    # 2 kWh PV charge, 3 kWh grid charge, then an unexplained 0.3 kWh drop (no load, no export): taken from the PV part first
+    # 2 kWh PV charge, 3 kWh grid charge, then an unexplained 0.3 kWh drop (no load, no export): a loss, taken from both
+    # parts in proportion (PV 2 - 0.12 = 1.88 of 4.7)
     pv = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
     imp = [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
     soc = [1.0, 1.0, 1.0, 1.0, 1.0, -0.3]
     zero = [0.0] * 6
     seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(zero), 10.0, 10.0, soc_history=cumulative(soc))
-    failed = check(failed, close(seed[1], 1.7 / 4.7) and close(noncompliant, 0.0), "measured SoC unexplained drop {} {}".format(seed, noncompliant))
+    failed = check(failed, close(seed[1], 1.88 / 4.7) and close(noncompliant, 0.0), "measured SoC unexplained drop {} {}".format(seed, noncompliant))
     # Grid charge 2 kWh, then 1 kWh exported from the battery with no PV: non-compliant
     seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative([0.0] * 3), cumulative([0.0, 0.0, 1.0]), cumulative([1.0, 1.0, 0.0]), cumulative([0.0] * 3), 10.0, 10.0, soc_history=cumulative([1.0, 1.0, -1.0]))
     failed = check(failed, close(noncompliant, 1.0) and close(seed[1], 0.0), "measured SoC non-compliant {} {}".format(seed, noncompliant))
@@ -245,19 +246,20 @@ def test_replay_meter_ticks():
     seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
     failed = check(failed, close(seed[1], 1.0 / 2.4) and close(noncompliant, 0.0), "meter ticks, load ahead of output {} {}".format(seed, noncompliant))
     # Unserved load carried is capped: 3 steps of a 0.1 kWh house the battery runs (no import) while the SoC meter
-    # doesn't move, then a 0.3 kWh drop. Only 0.25 kWh counts as house use, the other 0.05 is a loss from the PV part
+    # doesn't move, then a 0.3 kWh drop. Only 0.25 kWh counts as house use (grid part 2 -> 1.75), the other 0.05 is a
+    # loss from both parts in proportion
     pv = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     imp = [0.0, 2.0, 0.0, 0.0, 0.0, 0.0]
     load = [0.0, 0.0, 0.1, 0.1, 0.1, 0.0]
     soc = [1.0, 2.0, 0.0, 0.0, 0.0, -0.3]
     zero = [0.0] * 6
     seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
-    failed = check(failed, close(seed[1], 0.95 / 2.7), "meter ticks, carry cap {} {}".format(seed, noncompliant))
-    # Load the grid met while the battery idled is not unserved: a later 0.3 kWh drop is all loss, from the PV part
+    failed = check(failed, close(seed[1], 1.0 / 2.75), "meter ticks, carry cap {} {}".format(seed, noncompliant))
+    # Load the grid met while the battery idled is not unserved: a later 0.3 kWh drop is all loss (PV 1 of 3 -> 0.9 of 2.7)
     imp = [0.0, 2.0, 1.0, 1.0, 1.0, 0.0]
     load = [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
     seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
-    failed = check(failed, close(seed[1], 0.7 / 2.7), "meter ticks, grid-fed load is not unserved {} {}".format(seed, noncompliant))
+    failed = check(failed, close(seed[1], 0.9 / 2.7), "meter ticks, grid-fed load is not unserved {} {}".format(seed, noncompliant))
     # A drop left unmatched for the carry window is a loss even if load turns up later: 0.05 unexplained, 7 quiet
     # steps (35 minutes), then 0.05 of unserved load
     pv = [1.0, 0.0] + [0.0] * 9
@@ -266,7 +268,7 @@ def test_replay_meter_ticks():
     soc = [1.0, 2.0, -0.05] + [0.0] * 7 + [0.0]
     zero = [0.0] * 11
     seed, noncompliant, steps = export_budget_replay(EXPORT_BUDGET_PV_ORIGIN, cumulative(pv), cumulative(zero), cumulative(imp), cumulative(load), 10.0, 10.0, soc_history=cumulative(soc))
-    failed = check(failed, close(seed[1], 0.95 / 2.95), "meter ticks, carry window {} {}".format(seed, noncompliant))
+    failed = check(failed, close(seed[1], 1.0 / 3.0), "meter ticks, carry window {} {}".format(seed, noncompliant))
     return failed
 
 
