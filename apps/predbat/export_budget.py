@@ -141,7 +141,7 @@ def export_budget_replay(mode, pv_today, export_today, import_today, load_minute
 
     pv_origin labels battery flow per step. With soc_history (stored kWh keyed by minutes ago) the flow is the
     measured SoC change, starting from the stored energy at the start of the window counted as grid; a drop the
-    house and the meter do not explain (losses, BMS resync) comes off the PV part first. Because the meters tick
+    house and the meter do not explain (losses, BMS resync) comes off both parts in proportion. Because the meters tick
     in coarse steps, such a drop is first matched against house load the battery seemed to leave unserved within
     EXPORT_BUDGET_CARRY_MINUTES (either side, up to EXPORT_BUDGET_CARRY_KWH of it), and only what is left is a loss.
     Without SoC history the flow is estimated as PV + import - export - load, which reads conversion losses as
@@ -187,10 +187,14 @@ def export_budget_replay(mode, pv_today, export_today, import_today, load_minute
         return max(pv_part - (kwh - from_grid), 0.0), grid_part - from_grid
 
     def book_loss(parts, kwh):
-        """Battery output nothing explains (losses, BMS resync): from the PV part first"""
+        """Battery output nothing explains (losses, BMS resync): from both parts in proportion, as the prediction's
+        renormalisation to the SoC does, since a loss comes out of the whole battery"""
         pv_part, grid_part = parts
-        from_pv = min(pv_part, kwh)
-        return pv_part - from_pv, max(grid_part - (kwh - from_pv), 0.0)
+        total = pv_part + grid_part
+        if total <= 0:
+            return 0.0, 0.0
+        keep = max(total - kwh, 0.0) / total
+        return pv_part * keep, grid_part * keep
 
     for ago in range(available - step, -1, -step):
         if use_soc:

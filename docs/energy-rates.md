@@ -788,7 +788,7 @@ Each cycle Predbat replays up to the last 7 days of `pv_today`, `export_today`, 
 `load_today` history to find where the budget stands. It uses the history already loaded for load
 prediction, so the replay is shorter when [days_previous](apps-yaml.md#days_previous) covers fewer
 days (`history_steps` on the sensor shows how many 5 minute steps were replayed). For `pv_origin` it also reads 7 days of the
-battery's `soc_percent` (or `soc_kw`) history, so conversion losses are not mistaken for PV charge (the SoC and load meters tick in coarse steps, so battery output and house load are matched across up to 30 minutes before a difference counts as a loss);
+battery's `soc_percent` (or `soc_kw`) history, so conversion losses are not mistaken for PV charge (the SoC and load meters tick in coarse steps, so battery output and house load are matched across up to 30 minutes before a difference counts as a loss, which comes out of the PV and grid parts in proportion);
 without that history it estimates the battery flow and logs a warning. It publishes `predbat.export_budget`
 (exportable kWh now, with `planned_battery_export_kwh` and `noncompliant_export_kwh` - export in the
 replayed history the rule would not have allowed). Its `results` attribute holds the budget over the
