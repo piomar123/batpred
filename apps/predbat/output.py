@@ -18,6 +18,7 @@ schedules, rate window sensors, and financial metric summaries.
 
 import math
 import copy
+from bisect import bisect_left, bisect_right
 from html import escape as escape_html
 from datetime import datetime, timedelta, timezone
 from predbat import THIS_VERSION_DISPLAY
@@ -55,9 +56,14 @@ from utils import (
     export_limit_sort_key,
     pack_export_limit,
     export_limit_from_stored,
+    str2time,
 )
 from prediction import Prediction
 from billing import attach_billing, billing_entity_id, parse_axle_events, BILLING_DAYS, BILLING_EVENT_LABELS, BILLING_SLOT_FORMAT
+
+# Tags rate_replicate() gives a minute it filled in because the rate source had no rate for it (see Fetch.rate_replicate),
+# as opposed to the ones a source session, a manual rate or a rates override set
+REPLICATED_RATE_TAGS = ("copy", "offset", "future")
 
 # Per-slot plan "why" reason templates. Keyed by a stable reason code, each template is
 # rendered client-side (web_helper.py) by substituting {placeholder} names against the row's
@@ -3688,14 +3694,15 @@ class Output:
         past_rates_export = self.history_to_future_rates(self.rate_export, 24 * 60, end_record + self.minutes_now)
 
         # A rate source with no previous-day data (raw_today/raw_tomorrow sensors, Energi Data Service, Strømligning) leaves
-        # yesterday to rate_replicate(), which copies today's rates into it; use the rates recorded at the time for those minutes
-        recorded_rates = self.history_minute_data(".rates", 2) if self.rate_import_replicated else None
-        recorded_rates_export = self.history_minute_data(".rates_export", 2) if self.rate_export_replicated else None
-        replaced_import = self.replace_replicated_past_rates(past_rates, self.rate_import_replicated, recorded_rates, 24 * 60)
-        self.replace_replicated_past_rates(past_rates_no_io, self.rate_import_replicated, recorded_rates, 24 * 60)
-        replaced_export = self.replace_replicated_past_rates(past_rates_export, self.rate_export_replicated, recorded_rates_export, 24 * 60)
+        # yesterday to rate_replicate(), which copies today's rates into it; price those minutes from the rate table Predbat
+        # published while each slot was live instead. The no-IO rates only take them without Intelligent dispatch, as the
+        # published table carries the dispatch prices the no-IO rates leave out
+        replaced_import = self.replace_replicated_past_rates(past_rates, self.rate_import_replicated, ".rates", 24 * 60)
+        if not self.octopus_intelligent_charging:
+            self.replace_replicated_past_rates(past_rates_no_io, self.rate_import_replicated, ".rates", 24 * 60)
+        replaced_export = self.replace_replicated_past_rates(past_rates_export, self.rate_export_replicated, ".rates_export", 24 * 60)
         if replaced_import or replaced_export:
-            self.log("Calculate yesterday: took {} import and {} export minutes the rate source did not supply from the recorded {}.rates and {}.rates_export".format(replaced_import, replaced_export, self.prefix, self.prefix))
+            self.log("Calculate yesterday: priced {} import and {} export minutes the rate source did not supply from the rates {}.rates and {}.rates_export published at the time".format(replaced_import, replaced_export, self.prefix, self.prefix))
 
         # Assume user might charge at the lowest rate only, for fixed tariff
         # Only use yesterday's rate range (k < end_record) for the threshold to prevent today's rates
@@ -4763,23 +4770,63 @@ class Output:
                 future_rates[minute] = rates.get(minute - offset, 0.0)
         return future_rates
 
-    def replace_replicated_past_rates(self, past_rates, replicated, recorded, offset):
+    def replace_replicated_past_rates(self, past_rates, replicated, suffix, offset):
         """
         Overwrite the minutes of rates shifted back by history_to_future_rates() that rate_replicate() filled in, with the
-        rate recorded at that minute (minute data keyed by minutes ago, from history_minute_data()).
+        rate Predbat published for them at the time.
 
-        Minutes the rate source supplied itself are kept, as are minutes with nothing recorded. Returns how many were replaced.
+        Each minute takes the "results" table of predbat<suffix> as last published before its plan slot ended, so it gets
+        the rate the plan used while that slot was live: exact slot boundaries, any session or override of the time
+        included, and none of the lag of the entity's state, which only moves when a run publishes. Minutes the rate source
+        or an override set are kept, as are minutes no published table covers. Returns how many minutes were replaced.
         """
-        if not replicated or not recorded:
+        minutes = [minute for minute in past_rates if replicated.get(minute - offset) in REPLICATED_RATE_TAGS]
+        if not minutes:
             return 0
+        tables = self.published_rate_tables(suffix)
+        if not tables:
+            return 0
+        published = [table[0] for table in tables]
         replaced = 0
-        for minute in past_rates:
-            if (minute - offset) in replicated:
-                minutes_ago = self.minutes_now + offset - minute
-                if minutes_ago in recorded:
-                    past_rates[minute] = recorded[minutes_ago]
-                    replaced += 1
+        for minute in minutes:
+            rate_minute = minute - offset
+            when = self.midnight_utc + timedelta(minutes=rate_minute)
+            slot_end = self.midnight_utc + timedelta(minutes=(rate_minute // self.plan_interval_minutes + 1) * self.plan_interval_minutes)
+            index = bisect_left(published, slot_end) - 1
+            if index < 0:
+                continue
+            stamps, rates = tables[index][1], tables[index][2]
+            position = bisect_right(stamps, when) - 1
+            if position < 0:
+                continue
+            past_rates[minute] = rates[position]
+            replaced += 1
         return replaced
+
+    def published_rate_tables(self, suffix):
+        """
+        The rate tables predbat<suffix> published over the last two days, from its recorded "results" attribute.
+
+        Returns a list of (published time, sorted rate start times, rates), oldest first. The table holds a rate only where
+        it changes (filtered_times), so a rate applies from its start time until the next one. Records without a readable
+        table are skipped.
+        """
+        history = self.get_history_wrapper(entity_id=self.prefix + suffix, days=2, required=False)
+        if not history or not history[0]:
+            return []
+        tables = []
+        for record in history[0]:
+            results = (record.get("attributes") or {}).get("results")
+            if not results or not isinstance(results, dict):
+                continue
+            try:
+                published = str2time(record.get("last_updated"))
+                entries = sorted((str2time(stamp), float(rate)) for stamp, rate in results.items())
+            except (ValueError, TypeError):
+                continue
+            tables.append((published, [entry[0] for entry in entries], [entry[1] for entry in entries]))
+        tables.sort(key=lambda table: table[0])
+        return tables
 
     def window_as_text(self, windows, percents, ignore_min=False, ignore_max=False):
         """

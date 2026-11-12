@@ -2576,17 +2576,30 @@ def _reconstruct_windows_from_status(my_predbat, status_for_stamp):
     return captured
 
 
-def _test_recorded_rates_replace_replicated_minutes(my_predbat, failed):
+def _published_rates_history(tables):
     """
-    Yesterday's minutes that rate_replicate() filled in from today are priced from the recorded predbat.rates and
-    predbat.rates_export instead, while minutes the rate source supplied itself keep their rate.
+    History for a predbat.rates-style entity: one record per (published UTC time, {rate start UTC time: rate}), with the
+    table in the "results" attribute stamped as publish_rates() writes it.
+    """
+    records = []
+    for published, table in tables:
+        results = {start.strftime("%Y-%m-%dT%H:%M:%S%z"): rate for start, rate in table.items()}
+        records.append({"state": "0", "last_updated": published.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "attributes": {"results": results}})
+    return [records]
+
+
+def _test_published_rates_replace_replicated_minutes(my_predbat, failed):
+    """
+    Yesterday's minutes that rate_replicate() filled in from today are priced from the rate tables Predbat published at
+    the time, while minutes the rate source supplied itself keep their rate.
 
     A raw_today/raw_tomorrow sensor has no previous-day data, so yesterday was a copy of today: a day-dependent tariff
     or a spot price showed today's prices against yesterday's energy in the History view and the savings baseline.
     """
-    print("calculate_yesterday: recorded rates replace the replicated minutes")
+    print("calculate_yesterday: published rates replace the replicated minutes")
     now_utc = _setup_base(my_predbat)
-    yesterday = now_utc.replace(hour=0) - timedelta(days=1)
+    midnight_utc = my_predbat.midnight_utc
+    yesterday = midnight_utc - timedelta(days=1)
 
     # Yesterday holds a copy of today's flat 20p / 5p; only the morning was replicated, the afternoon came from the source
     for minute in range(-24 * 60, 0):
@@ -2596,19 +2609,15 @@ def _test_recorded_rates_replace_replicated_minutes(my_predbat, failed):
     my_predbat.rate_import_replicated = {minute: "copy" for minute in range(-24 * 60, -12 * 60)}
     my_predbat.rate_export_replicated = {minute: "copy" for minute in range(-24 * 60, -12 * 60)}
 
-    def _stamp(when):
-        """Format a UTC time as Home Assistant history stamps it."""
-        return when.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-
-    # What was really in force: 10p import and 7p export all of yesterday, back to 20p / 5p at midnight
-    recorded = {
-        my_predbat.prefix + ".rates": [[{"state": "99", "last_updated": _stamp(yesterday - timedelta(hours=1))}, {"state": "10", "last_updated": _stamp(yesterday)}, {"state": "20", "last_updated": _stamp(now_utc.replace(hour=0))}]],
-        my_predbat.prefix + ".rates_export": [[{"state": "99", "last_updated": _stamp(yesterday - timedelta(hours=1))}, {"state": "7", "last_updated": _stamp(yesterday)}, {"state": "5", "last_updated": _stamp(now_utc.replace(hour=0))}]],
+    # What Predbat published during yesterday: 10p import and 7p export all day, back to 20p / 5p from today's midnight
+    published = {
+        my_predbat.prefix + ".rates": _published_rates_history([(yesterday + timedelta(minutes=minute), {yesterday: 10, midnight_utc: 20}) for minute in range(5, 24 * 60, 30)]),
+        my_predbat.prefix + ".rates_export": _published_rates_history([(yesterday + timedelta(minutes=minute), {yesterday: 7, midnight_utc: 5}) for minute in range(5, 24 * 60, 30)]),
     }
 
     _captured_load, original_run_pred = _apply_mocks(my_predbat, now_utc)
     base_history = my_predbat.get_history_wrapper
-    my_predbat.get_history_wrapper = lambda entity_id, days=30, required=True, tracked=True: recorded.get(entity_id) or base_history(entity_id, days=days, required=required, tracked=tracked)
+    my_predbat.get_history_wrapper = lambda entity_id, days=30, required=True, tracked=True: published.get(entity_id) or base_history(entity_id, days=days, required=required, tracked=tracked)
     captured_rates = []
     mock_run_pred = _make_mock_run_prediction([])
 
@@ -2622,6 +2631,8 @@ def _test_recorded_rates_replace_replicated_minutes(my_predbat, failed):
     my_predbat.calculate_yesterday()
     _restore_methods(my_predbat, original_run_pred)
     my_predbat.savings_last_updated = None
+    my_predbat.rate_import_replicated = {}
+    my_predbat.rate_export_replicated = {}
 
     if not captured_rates:
         print("ERROR: the yesterday prediction was never run")
@@ -2642,6 +2653,86 @@ def _test_recorded_rates_replace_replicated_minutes(my_predbat, failed):
     if my_predbat.rate_import != rate_import_before:
         print("ERROR: rate_import was not restored")
         failed = True
+    return failed
+
+
+def _test_replace_replicated_past_rates(my_predbat, failed):
+    """
+    replace_replicated_past_rates(): each replicated minute takes the table last published before its plan slot ended,
+    so a rate changed during the slot counts and a later change doesn't; minutes tagged by anything other than
+    rate_replicate(), and minutes no table covers, keep their rate.
+    """
+    print("calculate_yesterday: replace_replicated_past_rates picks the table published during the slot")
+    _setup_base(my_predbat)
+    midnight_utc = my_predbat.midnight_utc
+    yesterday = midnight_utc - timedelta(days=1)
+    plan_interval_before = my_predbat.plan_interval_minutes
+    my_predbat.plan_interval_minutes = 30
+    seven = yesterday + timedelta(hours=7)
+
+    # 05:00: 07:00 forecast at 11p; 07:10 (in the 07:00 slot): 12p; 07:40 (in the 07:30 slot): 13p; 08:10 (after both
+    # ended): 14p. A record without a readable table is skipped. Nothing was published before 05:00, so 03:00 stays as it was
+    history = _published_rates_history(
+        [
+            (yesterday + timedelta(hours=5), {yesterday: 30, seven: 11}),
+            (seven + timedelta(minutes=10), {yesterday: 30, seven: 12}),
+            (seven + timedelta(minutes=40), {yesterday: 30, seven: 13}),
+            (seven + timedelta(minutes=70), {yesterday: 30, seven: 14}),
+        ]
+    )
+    history[0].insert(1, {"state": "0", "last_updated": (seven - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S+00:00"), "attributes": {"results": "not a table"}})
+    my_predbat.get_history_wrapper = lambda entity_id, days=30, required=True, tracked=True: history
+    try:
+        past_rates = {minute: 99 for minute in range(0, 24 * 60)}
+        replicated = {minute: "copy" for minute in range(-24 * 60, 0)}
+        replicated[7 * 60 + 40 - 24 * 60] = "user"  # a rates override on 07:40
+        replaced = my_predbat.replace_replicated_past_rates(past_rates, replicated, ".rates", 24 * 60)
+    finally:
+        del my_predbat.get_history_wrapper
+        my_predbat.plan_interval_minutes = plan_interval_before
+
+    expected = [
+        (3 * 60, 99, "03:00, before any table was published"),
+        (5 * 60 + 15, 30, "05:15, from the 05:00 table"),
+        (7 * 60, 12, "07:00, from the table published during the slot"),
+        (7 * 60 + 29, 12, "07:29, same slot"),
+        (7 * 60 + 30, 13, "07:30, from the table published during that slot"),
+        (7 * 60 + 40, 99, "07:40, set by a rates override"),
+        (8 * 60, 14, "08:00, from the 08:10 table"),
+    ]
+    for minute, value, what in expected:
+        if past_rates.get(minute) != value:
+            print("ERROR: {} should be {}, got {}".format(what, value, past_rates.get(minute)))
+            failed = True
+    if replaced != 24 * 60 - 5 * 60 - 1:
+        print("ERROR: replace_replicated_past_rates should replace {} minutes, got {}".format(24 * 60 - 5 * 60 - 1, replaced))
+        failed = True
+    return failed
+
+
+def _test_no_io_rates_keep_the_copy_with_intelligent_dispatch(my_predbat, failed):
+    """
+    The published import table carries Intelligent dispatch prices, which the no-IO rates leave out on purpose, so the
+    no-IO rates only take it when Intelligent dispatch isn't configured.
+    """
+    print("calculate_yesterday: no-IO rates and Intelligent dispatch")
+    for intelligent, expected_calls in ((False, [".rates", ".rates", ".rates_export"]), (True, [".rates", ".rates_export"])):
+        now_utc = _setup_base(my_predbat)
+        intelligent_before = my_predbat.octopus_intelligent_charging
+        my_predbat.octopus_intelligent_charging = intelligent
+        calls = []
+        my_predbat.replace_replicated_past_rates = lambda past_rates, replicated, suffix, offset: calls.append(suffix) or 0
+        _captured_load, original_run_pred = _apply_mocks(my_predbat, now_utc)
+        try:
+            my_predbat.calculate_yesterday()
+        finally:
+            _restore_methods(my_predbat, original_run_pred)
+            del my_predbat.replace_replicated_past_rates
+            my_predbat.octopus_intelligent_charging = intelligent_before
+            my_predbat.savings_last_updated = None
+        if calls != expected_calls:
+            print("ERROR: with octopus_intelligent_charging {} the rates replaced should be {}, got {}".format(intelligent, expected_calls, calls))
+            failed = True
     return failed
 
 
@@ -2806,6 +2897,8 @@ def test_calculate_yesterday(my_predbat):
     failed = _test_cross_charging_export_window_covers_the_slot(my_predbat, failed)
     failed = _test_split_status_warning(my_predbat, failed)
     failed = _test_warning_status_is_not_a_charge_state(my_predbat, failed)
-    failed = _test_recorded_rates_replace_replicated_minutes(my_predbat, failed)
+    failed = _test_published_rates_replace_replicated_minutes(my_predbat, failed)
+    failed = _test_replace_replicated_past_rates(my_predbat, failed)
+    failed = _test_no_io_rates_keep_the_copy_with_intelligent_dispatch(my_predbat, failed)
 
     return failed
