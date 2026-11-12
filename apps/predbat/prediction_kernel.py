@@ -149,6 +149,7 @@ class PkContext(ctypes.Structure):
         ("export_budget_cap", ctypes.c_double),
         ("export_budget_seed_bucket", ctypes.c_double),
         ("export_budget_seed_pv_share", ctypes.c_double),
+        ("export_hold_freeze", ctypes.c_int32),
     ]
 
 
@@ -924,6 +925,7 @@ def create_kernel_context(pred, static_cache=None):
         ctx.export_budget_cap = budget_cap if budget_cap > 0 else pred.soc_max
         budget_seed = getattr(pred, "export_budget_seed", None) if ctx.export_budget_mode else None
         ctx.export_budget_seed_bucket, ctx.export_budget_seed_pv_share = budget_seed if budget_seed else (0.0, 0.0)
+        ctx.export_hold_freeze = 1 if getattr(pred, "export_hold_freeze", False) else 0
 
         handle = lib.pk_context_create(ctypes.byref(ctx))
         if handle:
