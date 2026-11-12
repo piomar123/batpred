@@ -3777,6 +3777,16 @@ class Output:
         past_rates_no_io = self.history_to_future_rates(self.rate_import_no_io, 24 * 60, end_record + self.minutes_now)
         past_rates_export = self.history_to_future_rates(self.rate_export, 24 * 60, end_record + self.minutes_now)
 
+        # A rate source with no previous-day data (raw_today/raw_tomorrow sensors, Energi Data Service, Strømligning) leaves
+        # yesterday to rate_replicate(), which copies today's rates into it; use the rates recorded at the time for those minutes
+        recorded_rates = self.history_minute_data(".rates", 2) if self.rate_import_replicated else None
+        recorded_rates_export = self.history_minute_data(".rates_export", 2) if self.rate_export_replicated else None
+        replaced_import = self.replace_replicated_past_rates(past_rates, self.rate_import_replicated, recorded_rates, 24 * 60)
+        self.replace_replicated_past_rates(past_rates_no_io, self.rate_import_replicated, recorded_rates, 24 * 60)
+        replaced_export = self.replace_replicated_past_rates(past_rates_export, self.rate_export_replicated, recorded_rates_export, 24 * 60)
+        if replaced_import or replaced_export:
+            self.log("Calculate yesterday: took {} import and {} export minutes the rate source did not supply from the recorded {}.rates and {}.rates_export".format(replaced_import, replaced_export, self.prefix, self.prefix))
+
         # Assume user might charge at the lowest rate only, for fixed tariff
         # Only use yesterday's rate range (k < end_record) for the threshold to prevent today's rates
         # (which are added progressively as minutes_now increases) from changing the baseline charge
@@ -4848,6 +4858,24 @@ class Output:
             for minute in range(0, end_record):
                 future_rates[minute] = rates.get(minute - offset, 0.0)
         return future_rates
+
+    def replace_replicated_past_rates(self, past_rates, replicated, recorded, offset):
+        """
+        Overwrite the minutes of rates shifted back by history_to_future_rates() that rate_replicate() filled in, with the
+        rate recorded at that minute (minute data keyed by minutes ago, from history_minute_data()).
+
+        Minutes the rate source supplied itself are kept, as are minutes with nothing recorded. Returns how many were replaced.
+        """
+        if not replicated or not recorded:
+            return 0
+        replaced = 0
+        for minute in past_rates:
+            if (minute - offset) in replicated:
+                minutes_ago = self.minutes_now + offset - minute
+                if minutes_ago in recorded:
+                    past_rates[minute] = recorded[minutes_ago]
+                    replaced += 1
+        return replaced
 
     def window_as_text(self, windows, percents, ignore_min=False, ignore_max=False):
         """
