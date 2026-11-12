@@ -2576,6 +2576,75 @@ def _reconstruct_windows_from_status(my_predbat, status_for_stamp):
     return captured
 
 
+def _test_recorded_rates_replace_replicated_minutes(my_predbat, failed):
+    """
+    Yesterday's minutes that rate_replicate() filled in from today are priced from the recorded predbat.rates and
+    predbat.rates_export instead, while minutes the rate source supplied itself keep their rate.
+
+    A raw_today/raw_tomorrow sensor has no previous-day data, so yesterday was a copy of today: a day-dependent tariff
+    or a spot price showed today's prices against yesterday's energy in the History view and the savings baseline.
+    """
+    print("calculate_yesterday: recorded rates replace the replicated minutes")
+    now_utc = _setup_base(my_predbat)
+    yesterday = now_utc.replace(hour=0) - timedelta(days=1)
+
+    # Yesterday holds a copy of today's flat 20p / 5p; only the morning was replicated, the afternoon came from the source
+    for minute in range(-24 * 60, 0):
+        my_predbat.rate_import[minute] = 20
+        my_predbat.rate_import_no_io[minute] = 20
+        my_predbat.rate_export[minute] = 5
+    my_predbat.rate_import_replicated = {minute: "copy" for minute in range(-24 * 60, -12 * 60)}
+    my_predbat.rate_export_replicated = {minute: "copy" for minute in range(-24 * 60, -12 * 60)}
+
+    def _stamp(when):
+        """Format a UTC time as Home Assistant history stamps it."""
+        return when.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    # What was really in force: 10p import and 7p export all of yesterday, back to 20p / 5p at midnight
+    recorded = {
+        my_predbat.prefix + ".rates": [[{"state": "99", "last_updated": _stamp(yesterday - timedelta(hours=1))}, {"state": "10", "last_updated": _stamp(yesterday)}, {"state": "20", "last_updated": _stamp(now_utc.replace(hour=0))}]],
+        my_predbat.prefix + ".rates_export": [[{"state": "99", "last_updated": _stamp(yesterday - timedelta(hours=1))}, {"state": "7", "last_updated": _stamp(yesterday)}, {"state": "5", "last_updated": _stamp(now_utc.replace(hour=0))}]],
+    }
+
+    _captured_load, original_run_pred = _apply_mocks(my_predbat, now_utc)
+    base_history = my_predbat.get_history_wrapper
+    my_predbat.get_history_wrapper = lambda entity_id, days=30, required=True, tracked=True: recorded.get(entity_id) or base_history(entity_id, days=days, required=required, tracked=tracked)
+    captured_rates = []
+    mock_run_pred = _make_mock_run_prediction([])
+
+    def _capture_rates(*args, **kwargs):
+        """Record the rates the yesterday prediction is run with."""
+        captured_rates.append((dict(my_predbat.rate_import), dict(my_predbat.rate_export)))
+        return mock_run_pred(my_predbat, *args, **kwargs)
+
+    my_predbat.run_prediction = _capture_rates
+    rate_import_before = dict(my_predbat.rate_import)
+    my_predbat.calculate_yesterday()
+    _restore_methods(my_predbat, original_run_pred)
+    my_predbat.savings_last_updated = None
+
+    if not captured_rates:
+        print("ERROR: the yesterday prediction was never run")
+        return True
+    rate_import, rate_export = captured_rates[0]
+    expected = [
+        (rate_import, 0, 10, "import at yesterday 00:00 (replicated)"),
+        (rate_import, 11 * 60 + 59, 10, "import at yesterday 11:59 (replicated)"),
+        (rate_import, 12 * 60, 20, "import at yesterday 12:00 (supplied by the source)"),
+        (rate_import, 24 * 60 + 60, 20, "import at today 01:00"),
+        (rate_export, 0, 7, "export at yesterday 00:00 (replicated)"),
+        (rate_export, 12 * 60, 5, "export at yesterday 12:00 (supplied by the source)"),
+    ]
+    for rates, minute, value, what in expected:
+        if rates.get(minute) != value:
+            print("ERROR: {} should be {}, got {}".format(what, value, rates.get(minute)))
+            failed = True
+    if my_predbat.rate_import != rate_import_before:
+        print("ERROR: rate_import was not restored")
+        failed = True
+    return failed
+
+
 def _test_warning_status_is_not_a_charge_state(my_predbat, failed):
     """A warning pinned on predbat.status must not be rebuilt as a charge window.
 
@@ -2737,5 +2806,6 @@ def test_calculate_yesterday(my_predbat):
     failed = _test_cross_charging_export_window_covers_the_slot(my_predbat, failed)
     failed = _test_split_status_warning(my_predbat, failed)
     failed = _test_warning_status_is_not_a_charge_state(my_predbat, failed)
+    failed = _test_recorded_rates_replace_replicated_minutes(my_predbat, failed)
 
     return failed
