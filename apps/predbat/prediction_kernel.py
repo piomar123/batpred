@@ -32,8 +32,8 @@ from const import PREDICT_STEP, PREDBAT_MAX_CARS, EXPORT_MODE_TARGET, FULL_EXPOR
 from utils import net_settlement_seed_from, get_curve_value, find_battery_temperature_cap, in_car_slot, in_iboost_slot
 
 # Expected ABI/parity revisions of the shared library (see prediction_kernel.cpp)
-KERNEL_ABI_VERSION = 12
-KERNEL_PARITY_REVISION = 20
+KERNEL_ABI_VERSION = 1012
+KERNEL_PARITY_REVISION = 1020
 
 # Maximum number of cars supported by the kernel (PK_MAX_CARS in prediction_kernel.cpp)
 KERNEL_MAX_CARS = PREDBAT_MAX_CARS
