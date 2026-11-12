@@ -2791,6 +2791,7 @@ APPS_SCHEMA = {
         "sensor_type": "float",
     },
     "load_forecast_only": {"type": "boolean"},
+    "export_hold_freeze": {"type": "boolean"},
     "load_forecast": {
         "type": "sensor_list",
         "sensor_type": "dict|list",

@@ -1605,6 +1605,18 @@ This does not apply to the built-in [AlphaESS Cloud](#alphaess-cloud-api) compon
 
 When set, Predbat feeds this rate into the normal AC balance during a Freeze Export period instead of the load-covering discharge: house load consumes it first, and any surplus may reach the grid, subject to the battery reserve and the physical export limit. Leave this at `0` (the default) if your inverter discharges to cover house load during Freeze Export.
 
+### **export_hold_freeze**
+
+Global setting, defaults to `False` (disabled).
+
+An export window with a target SoC force exports down to the target and then, for the rest of the window, normally holds in Demand mode ("Hold exporting"). In Demand mode surplus solar charges the battery, so the SoC rises above the target again and Predbat force exports it back down at full power - with plenty of solar this repeats every few minutes, cycling the battery for nothing.
+
+When set to `True`, the rest of the window is held as Freeze Export instead (shown as "Freeze exporting"): the battery still covers the house, but surplus solar is exported rather than charged into the battery. Both the plan and the inverter control change, so the optimiser sees that solar in such a window is exported. Needs **switch.predbat_set_export_freeze** on and an inverter that supports Freeze Export; otherwise the window holds in Demand mode as before.
+
+```yaml
+  export_hold_freeze: True
+```
+
 ## Controlling the Inverter
 
 There are a few different ways to control your inverter:

@@ -596,6 +596,7 @@ class Execute:
 
         # Skipped entirely while an inverter calibrates
         for inverter in [] if calibrating else self.inverters:
+            export_hold_frozen = False
             # Read-only mode
             if self.set_read_only:
                 if self.set_read_only_axle:
@@ -980,7 +981,10 @@ class Execute:
                     else:
                         inverter.adjust_force_export(False)
                         disabled_export = True
-                        if self.set_export_freeze and export_mode_of(self.export_limits_best[0]) == EXPORT_MODE_FREEZE:
+                        # export_hold_freeze: a target window at/below its target holds as Freeze Export, not Demand,
+                        # so PV can't push the SoC over the target and set off a full-power export back down to it
+                        export_hold_frozen = self.export_hold_freeze and export_mode_of(self.export_limits_best[0]) == EXPORT_MODE_TARGET
+                        if self.set_export_freeze and (export_mode_of(self.export_limits_best[0]) == EXPORT_MODE_FREEZE or export_hold_frozen):
                             # In export freeze mode we disable charging during export slots
                             if inverter.inv_charge_discharge_with_rate:
                                 charge_rate = 0
@@ -1165,7 +1169,7 @@ class Execute:
                         self.adjust_battery_target_multi(inverter, 0, isCharging, isExporting)
 
                     # Immediate controls
-                    if self.set_export_freeze and export_mode_of(self.export_limits_best[0]) == EXPORT_MODE_FREEZE:
+                    if self.set_export_freeze and (export_mode_of(self.export_limits_best[0]) == EXPORT_MODE_FREEZE or export_hold_frozen):
                         inverter.adjust_export_immediate(inverter.soc_percent, freeze=True)
                     elif not disabled_export:
                         # Each inverter's own share of the fleet target, the same split the export rates were allocated by, as an
