@@ -8,3 +8,4 @@ pr/export-energy-budget             springfall2008/batpred#5538
 fix/export-budget-window-floor      on trial on the Pi, then into #5538 (based on pr/export-energy-budget)
 feat/predheat-two-zone              fork-only, Predheat two-zone mode
 feat/export-hold-freeze             not yet offered upstream
+fix/history-yesterday-recorded-rates  upstream issue/PR not opened yet
