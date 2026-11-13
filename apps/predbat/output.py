@@ -59,6 +59,10 @@ from utils import (
 from prediction import Prediction
 from billing import attach_billing, billing_entity_id, parse_axle_events, BILLING_DAYS, BILLING_EVENT_LABELS, BILLING_SLOT_FORMAT
 
+# Tags rate_replicate() gives a minute it filled in because the rate source had no rate for it (see Fetch.rate_replicate),
+# as opposed to the ones a session, a manual rate or a rates override set
+REPLICATED_RATE_TAGS = ("copy", "offset", "future")
+
 # Per-slot plan "why" reason templates. Keyed by a stable reason code, each template is
 # rendered client-side (web_helper.py) by substituting {placeholder} names against the row's
 # own "reasons" params - published once here rather than duplicating the rendered sentence on
@@ -3686,6 +3690,19 @@ class Output:
         past_rates_no_io = self.history_to_future_rates(self.rate_import_no_io, 24 * 60, end_record + self.minutes_now)
         past_rates_export = self.history_to_future_rates(self.rate_export, 24 * 60, end_record + self.minutes_now)
 
+        # A rate source with no previous-day data (raw_today/raw_tomorrow sensors, Energi Data Service, Strømligning) leaves
+        # yesterday to rate_replicate(), which copies today's rates into it; price those minutes from the rates recorded at
+        # the time instead. The no-IO rates only take them without Intelligent dispatch, as the recorded rates carry the
+        # dispatch prices the no-IO rates leave out
+        recorded_import = self.recorded_rates_for_replicated(self.rate_import_replicated, ".rates", 24 * 60, end_record + self.minutes_now)
+        recorded_export = self.recorded_rates_for_replicated(self.rate_export_replicated, ".rates_export", 24 * 60, end_record + self.minutes_now)
+        past_rates.update(recorded_import)
+        if not self.octopus_intelligent_charging:
+            past_rates_no_io.update(recorded_import)
+        past_rates_export.update(recorded_export)
+        if recorded_import or recorded_export:
+            self.log("Calculate yesterday: priced {} import and {} export minutes the rate source did not supply from the recorded {}.rates and {}.rates_export".format(len(recorded_import), len(recorded_export), self.prefix, self.prefix))
+
         # Assume user might charge at the lowest rate only, for fixed tariff
         # Only use yesterday's rate range (k < end_record) for the threshold to prevent today's rates
         # (which are added progressively as minutes_now increases) from changing the baseline charge
@@ -4752,6 +4769,36 @@ class Output:
             for minute in range(0, end_record):
                 future_rates[minute] = rates.get(minute - offset, 0.0)
         return future_rates
+
+    def recorded_rates_for_replicated(self, replicated, suffix, offset, end_record):
+        """
+        The rates recorded in predbat<suffix> for the minutes 0..end_record of a history_to_future_rates() array shifted
+        back by offset that rate_replicate() filled in, keyed by those minutes.
+
+        Minutes a source, a session, a manual rate or a rates override set are left out, as are minutes with nothing
+        recorded. The state only moves when a run publishes, which can be a minute or more after the slot boundary the
+        rate changed at (the midnight run is a slow one), so a change recorded within a run of a plan slot's start counts
+        from the start of the slot.
+        """
+        minutes = [minute for minute in range(end_record) if replicated.get(minute - offset) in REPLICATED_RATE_TAGS]
+        if not minutes:
+            return {}
+        recorded = self.history_minute_data(suffix, 2)
+        if not recorded:
+            return {}
+        settle = min(RUN_EVERY, self.plan_interval_minutes - 1)
+        rates = {}
+        for minute in minutes:
+            slot_offset = (minute - offset) % self.plan_interval_minutes
+            if slot_offset < settle:
+                minutes_ago = self.minutes_now + offset - (minute - slot_offset + settle)
+                if minutes_ago > 0 and minutes_ago in recorded:
+                    rates[minute] = recorded[minutes_ago]
+                    continue
+            minutes_ago = self.minutes_now + offset - minute
+            if minutes_ago in recorded:
+                rates[minute] = recorded[minutes_ago]
+        return rates
 
     def window_as_text(self, windows, percents, ignore_min=False, ignore_max=False):
         """
