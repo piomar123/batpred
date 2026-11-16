@@ -65,7 +65,8 @@
 // ABI 12 (net settlement branch): PkContext gained metric_net_settlement_window and the net_seed_* fields at the end.
 // ABI 12 (export budget branch): PkContext gained export_budget_mode, export_budget_cap and the export budget seed at the end.
 // ABI 12 (export hold freeze branch): PkContext::export_hold_freeze, appended.
-#define PK_ABI_VERSION 12
+// Fork (tools/fork/rebuild.sh): local ABI 1012 = 1000 + 12 for this combination of branches.
+#define PK_ABI_VERSION 1012
 #define PK_CURVE_WIDTH 103 // a rate grid curve row: 101 SoC percents, the rated rate, then the absolute temperature cap
 // Parity 14: the explicit (mode, target, power) fields replace the packed double throughout the hot
 // loop (see the ABI 6 note); the floor a target exports to now reads the target field, matching
@@ -91,7 +92,8 @@
 // Parity 20: below a manual_soc or alert floor the keep penalty's import rate, and above a manual_soc_max
 // ceiling its export rate, is at least PK_KEEP_TARGET_MIN_RATE, so a target in a free or negative-price
 // slot still costs something to miss (#5162).
-#define PK_PARITY_REVISION 23
+// Fork (tools/fork/rebuild.sh): local parity 1023 = 1000 + 23.
+#define PK_PARITY_REVISION 1023
 #define PK_MAX_CARS 8
 #define PK_RUN_EVERY 5 // const.py RUN_EVERY
 #define PK_KEEP_TARGET_MIN_RATE 1.0 // const.py KEEP_TARGET_MIN_RATE
