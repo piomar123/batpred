@@ -122,6 +122,73 @@ def run_model_tests(my_predbat, prediction_kernel=False):
             battery_rate_max_charge=2.0,
             assert_battery_cycle=0.7111,
         )
+    # export_hold_freeze: a target export window at/below its target (95% here, SoC 90%) holds as
+    # Freeze Export. With PV surplus the battery must not charge (the surplus is exported) - in
+    # Demand it charges to the target and is force exported back down to it every step.
+    my_predbat.export_hold_freeze = True
+    failed |= simple_scenario(
+        "export_hold_freeze_surplus_exported",
+        my_predbat,
+        0,
+        1.0,
+        assert_final_metric=-5.0,
+        assert_final_soc=9.0,
+        battery_size=10.0,
+        battery_soc=9.0,
+        discharge=95,
+        end_record=60,
+        battery_rate_max_charge=1.0,
+        assert_battery_cycle=0.0,
+    )
+    # ... and still covers a load shortfall, like any Freeze Export
+    failed |= simple_scenario(
+        "export_hold_freeze_shortfall_discharges",
+        my_predbat,
+        1.0,
+        0,
+        assert_final_metric=0.0,
+        assert_final_soc=8.0,
+        battery_size=10.0,
+        battery_soc=9.0,
+        discharge=95,
+        end_record=60,
+        battery_rate_max_charge=1.0,
+        assert_battery_cycle=1.0,
+    )
+    # Above the target it is still a real export down to it
+    failed |= simple_scenario(
+        "export_hold_freeze_exports_down_to_target",
+        my_predbat,
+        0,
+        0,
+        assert_final_metric=-2.5,
+        assert_final_soc=9.5,
+        battery_size=10.0,
+        battery_soc=10.0,
+        discharge=95,
+        end_record=60,
+        battery_rate_max_charge=1.0,
+        assert_battery_cycle=0.5,
+    )
+    my_predbat.export_hold_freeze = False
+    # Off (upstream): the same window holds in Demand, so PV charges the battery up to the target and
+    # each step over it is force exported again (the battery cycles; metrics here are within the 0.1
+    # tolerance of each other, so SoC and battery cycle carry the check)
+    failed |= simple_scenario(
+        "export_hold_demand_surplus_charges",
+        my_predbat,
+        0,
+        1.0,
+        assert_final_metric=-3.0,
+        assert_final_soc=9.5,
+        battery_size=10.0,
+        battery_soc=9.0,
+        discharge=95,
+        end_record=60,
+        battery_rate_max_charge=1.0,
+        assert_battery_cycle=1.0,
+    )
+
     # When inverter_freeze_export_discharge_rate is configured the user is telling Predbat
     # their inverter does NOT cover house load during Freeze Export - it only leaks this fixed
     # rate. So the configured rate wins over the shortfall discharge above. Same scenario as
