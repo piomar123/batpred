@@ -333,11 +333,11 @@ def _run_update(my_predbat, predheat_args, history=None, states_now=None, zone1_
         real_minute_data = predheat.minute_data_entity
         predheat.get_history = lambda entity_id=None, days=30, **kwargs: [list(zone1_room_items)] if entity_id == "sensor.zone1_room" else []
 
-        def fake_minute_data(now_utc, key, incrementing=False, smoothing=False, scaling=1.0, entity_ids=None):
+        def fake_minute_data(now_utc, key, incrementing=False, smoothing=False, scaling=1.0, entity_ids=None, **kwargs):
             """Constant history for the fake entities, as minute -> value going back three days."""
             name = entity_ids if entity_ids is not None else predheat_args.get(key)
             if zone1_room_items is not None and name == "sensor.zone1_room":
-                return real_minute_data(now_utc, key, incrementing=incrementing, smoothing=smoothing, scaling=scaling, entity_ids=entity_ids)
+                return real_minute_data(now_utc, key, incrementing=incrementing, smoothing=smoothing, scaling=scaling, entity_ids=entity_ids, **kwargs)
             if name not in history:
                 return {}, 0
             return {minute: history[name] for minute in range(0, 3 * 24 * 60)}, 3
