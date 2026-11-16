@@ -10,7 +10,6 @@ This fork carries changes that aren't in upstream Predbat yet. They're kept as o
 | --- | --- | --- |
 | Net settlement of import/export within wall-clock windows, for tariffs that net them per hour or quarter-hour before billing (e.g. Polish net-billing) | [#5429](https://github.com/springfall2008/batpred/pull/5429) | `metric_net_settlement_window_minutes` |
 | Export energy budget: only export battery energy that came from PV | [#5538](https://github.com/springfall2008/batpred/pull/5538) | `export_budget_mode` |
-| A failed auto power curve search is retried about hourly instead of on every poll (12-15 s of CPU a minute on a Pi 4) | not offered yet | - |
 | Charge/discharge power deadband 2% instead of 5%, so low-power targets on a ~3.5 kW battery are written | fork-only | - |
 | Predheat two-zone mode: a second zone with its own thermostat, heat loss and emitters, for heat pumps serving two zones | fork-only | `predheat: two_zone` |
 | A target export window that has reached its target holds as Freeze Export instead of Demand, so PV can't charge the battery over the target and set off a full-power export back down to it | not offered yet | `export_hold_freeze` |
