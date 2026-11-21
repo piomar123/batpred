@@ -8,4 +8,4 @@ fix/export-budget-window-floor      on trial on the Pi, then into #5538 (based o
 feat/predheat-two-zone              fork-only, Predheat two-zone mode
 feat/export-hold-freeze             not yet offered upstream
 fix/history-yesterday-recorded-rates  upstream issue/PR not opened yet
-fix/charge-window-24h-wrap-v9.9.0   upstream PR from fix/charge-window-24h-wrap (on main), not opened yet
+fix/charge-window-24h-wrap-v9.9.0   springfall2008/batpred#6298 (opened from fix/charge-window-24h-wrap, on main)
