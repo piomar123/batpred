@@ -4,8 +4,8 @@
 feat/net-settlement-window          springfall2008/batpred#5429
 local/rate-deadband-2pct            fork-only, never offered upstream
 pr/export-energy-budget             springfall2008/batpred#5538
-fix/export-budget-window-floor      on trial on the Pi, then into #5538 (based on pr/export-energy-budget)
+fix/export-budget-window-floor      on trial on the Pi, then into #5538 (based on pr/export-energy-budget, rebased 2026-11-24)
 feat/predheat-two-zone              fork-only, Predheat two-zone mode
 feat/export-hold-freeze             not yet offered upstream
 fix/history-yesterday-recorded-rates  upstream issue/PR not opened yet
-fix/charge-window-24h-wrap-v9.9.0   springfall2008/batpred#6298 (opened from fix/charge-window-24h-wrap, on main)
+fix/charge-window-24h-wrap          springfall2008/batpred#6298 (on main; the -v9.9.0 copy was for the v9.9.0 base)
