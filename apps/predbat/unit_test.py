@@ -35,6 +35,7 @@ from tests.test_inverter_config_sensor import test_inverter_config_sensor
 from tests.test_solar_surplus import run_solar_surplus_tests
 from tests.test_kernel_parity import run_kernel_parity_tests, run_model_kernel_tests
 from tests.test_net_settlement_config import run_net_settlement_config_tests
+from tests.test_export_budget import run_export_budget_tests
 from tests.test_prediction_batch import run_prediction_batch_tests
 from tests.test_kernel_static_cache import run_kernel_static_cache_tests
 from tests.test_execute import run_execute_tests
@@ -625,6 +626,7 @@ def main():
         ("model_kernel", run_model_kernel_tests, "Model tests run with the C++ prediction kernel enabled", False),
         ("kernel_parity", run_kernel_parity_tests, "C++ prediction kernel vs Python engine parity tests", False),
         ("net_settlement_config", run_net_settlement_config_tests, "metric_net_settlement_window_minutes parsing and logging tests", False),
+        ("export_budget", run_export_budget_tests, "Export energy budget (export_budget_mode) tests", False),
         ("prediction_batch", run_prediction_batch_tests, "Batched prediction fan-out tests", False),
         ("inverter", run_inverter_tests, "Inverter tests", False),
         ("inverter_rate_no_entity", run_inverter_rate_no_entity_tests, "Rate read-back for an inverter with no rate entity, sent as {power} (#3311)", False),
