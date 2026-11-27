@@ -9,7 +9,7 @@
 
 """Tests for Predheat's two-zone model (predheat_twozone.py) and its wiring into PredHeat."""
 
-from predheat_twozone import parse_two_zone_config, simulate_two_zone
+from predheat_twozone import parse_two_zone_config, parse_dhw_active, simulate_two_zone
 from predheat import PredHeat
 from datetime import datetime, timedelta, timezone
 
@@ -108,6 +108,56 @@ def check_parse():
         if zones is not None or not any(expected in error for error in errors):
             print("  ERROR: config {} should give an error containing '{}', got {} {}".format(cfg, expected, zones, errors))
             failed = True
+    failed |= check_parse_refit_keys(minimal)
+    return failed
+
+
+def check_parse_refit_keys(minimal):
+    """parse_two_zone_config / parse_dhw_active: the optional controller, valve and dhw_active keys."""
+    failed = False
+    zones, _, errors = parse_two_zone_config(minimal)
+    if errors or any(zone["controller"] is not None or zone["valve"] is not None for zone in zones):
+        print("  ERROR: without the keys controller and valve should be None, got {} {}".format(zones, errors))
+        failed = True
+
+    zone2 = dict(minimal["zone2"], controller={"offset": 1.49, "slope": 1.09, "resolution": 1.0})
+    zones, _, errors = parse_two_zone_config({"zone1": minimal["zone1"], "zone2": zone2})
+    if errors or zones[1]["controller"] != {"offset": 1.49, "slope": 1.09, "resolution": 1.0}:
+        print("  ERROR: zone2 controller did not parse: {} {}".format(zones, errors))
+        failed = True
+    zones, _, errors = parse_two_zone_config({"zone1": minimal["zone1"], "zone2": dict(minimal["zone2"], controller={})})
+    if errors or zones[1]["controller"] != {"offset": 0.0, "slope": 1.0, "resolution": 0.0}:
+        print("  ERROR: controller defaults not applied: {} {}".format(zones, errors))
+        failed = True
+    zones, _, errors = parse_two_zone_config({"zone1": dict(minimal["zone1"], valve={"temperature": 20.7, "band": 1.0}), "zone2": minimal["zone2"]})
+    if errors or zones[0]["valve"] != {"temperature": 20.7, "band": 1.0}:
+        print("  ERROR: zone1 valve did not parse: {} {}".format(zones, errors))
+        failed = True
+
+    bad_cases = [
+        ({"zone1": minimal["zone1"], "zone2": dict(minimal["zone2"], controller={"slope": 0})}, "zone2.controller.slope must be above 0"),
+        ({"zone1": minimal["zone1"], "zone2": dict(minimal["zone2"], controller={"resolution": -1})}, "zone2.controller.resolution must be at least 0"),
+        ({"zone1": minimal["zone1"], "zone2": dict(minimal["zone2"], controller=5)}, "zone2.controller must be a dictionary"),
+        ({"zone1": dict(minimal["zone1"], valve={"temperature": 20.7, "band": 0}), "zone2": minimal["zone2"]}, "zone1.valve.band must be above 0"),
+        ({"zone1": dict(minimal["zone1"], valve={"band": 1.0}), "zone2": minimal["zone2"]}, "zone1.valve.temperature is required"),
+        ({"zone1": dict(minimal["zone1"], valve="x"), "zone2": minimal["zone2"]}, "zone1.valve must be a dictionary"),
+        ({"zone1": minimal["zone1"], "zone2": minimal["zone2"], "dhw_active": 3}, "dhw_active must be an entity id"),
+    ]
+    for cfg, expected in bad_cases:
+        zones, _, errors = parse_two_zone_config(cfg)
+        if zones is not None or not any(expected in error for error in errors):
+            print("  ERROR: config {} should give an error containing '{}', got {} {}".format(cfg, expected, zones, errors))
+            failed = True
+
+    for cfg, expected in (({"dhw_active": "sensor.aquarea_dhw_running"}, ("sensor.aquarea_dhw_running", [])), ({}, (None, [])), ({"dhw_active": None}, (None, []))):
+        got = parse_dhw_active(cfg)
+        if got != expected:
+            print("  ERROR: parse_dhw_active({}) = {}, expected {}".format(cfg, got, expected))
+            failed = True
+    entity, errors = parse_dhw_active({"dhw_active": 3})
+    if entity is not None or not errors:
+        print("  ERROR: parse_dhw_active with a number should give an error, got {} {}".format(entity, errors))
+        failed = True
     return failed
 
 

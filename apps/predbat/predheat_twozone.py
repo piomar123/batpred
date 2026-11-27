@@ -43,6 +43,45 @@ def _number(value, name, errors, minimum=None, positive=False):
     return number
 
 
+def _parse_optional_block(raw, name, fields, errors):
+    """
+    Parse an optional dictionary of numbers (zone controller or valve).
+
+    fields is a tuple of (key, default, options): default None makes the key required, options are passed to _number.
+    Returns None when the block is absent or invalid (errors are recorded), else a dict of floats.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        errors.append("{} must be a dictionary, got {}".format(name, raw))
+        return None
+    block = {}
+    for key, default, options in fields:
+        if key not in raw and default is None:
+            errors.append("{}.{} is required".format(name, key))
+            continue
+        block[key] = _number(raw.get(key, default), "{}.{}".format(name, key), errors, **options)
+    return block
+
+
+CONTROLLER_FIELDS = (("offset", 0.0, {}), ("slope", 1.0, {"positive": True}), ("resolution", 0.0, {"minimum": 0}))
+VALVE_FIELDS = (("temperature", None, {}), ("band", None, {"positive": True}))
+
+
+def parse_dhw_active(cfg):
+    """
+    Read the optional two_zone dhw_active key: the entity that is 1 while the heat pump heats the hot-water tank.
+
+    Returns (entity_id or None, errors). Never raises.
+    """
+    value = cfg.get("dhw_active", None) if isinstance(cfg, dict) else None
+    if value is None:
+        return None, []
+    if not isinstance(value, str):
+        return None, ["dhw_active must be an entity id, got {}".format(value)]
+    return value, []
+
+
 def parse_two_zone_config(cfg):
     """
     Read and validate the predheat two_zone block.
@@ -79,12 +118,16 @@ def parse_two_zone_config(cfg):
                 errors.append("{}.{} must be an entity id, got {}".format(name, key, value))
                 value = None
             zone[key] = value
+        zone["controller"] = _parse_optional_block(raw.get("controller", None), name + ".controller", CONTROLLER_FIELDS, errors)
+        zone["valve"] = _parse_optional_block(raw.get("valve", None), name + ".valve", VALVE_FIELDS, errors)
         zones.append(zone)
 
     if zones and zones[0]["name"] == "zone1":
         for key in ("internal_temperature", "target_temperature"):
             if not zones[0][key]:
                 errors.append("zone1.{} is required".format(key))
+
+    errors.extend(parse_dhw_active(cfg)[1])
 
     if errors:
         return None, 0.0, errors
