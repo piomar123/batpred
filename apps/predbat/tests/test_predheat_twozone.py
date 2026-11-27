@@ -9,7 +9,7 @@
 
 """Tests for Predheat's two-zone model (predheat_twozone.py) and its wiring into PredHeat."""
 
-from predheat_twozone import parse_two_zone_config, parse_dhw_active, simulate_two_zone
+from predheat_twozone import parse_two_zone_config, parse_dhw_active, simulate_two_zone, controller_reading, valve_factor
 from predheat import PredHeat
 from datetime import datetime, timedelta, timezone
 
@@ -299,10 +299,99 @@ def check_golden():
     return failed
 
 
+def _always_heating(dhw=None):
+    """Both zones at 1 kW fixed output, targets far above the room, outside 0C, for 24 hours."""
+    zones = [_zone(heat_output=1000.0), _zone(heat_output=1000.0)]
+    return simulate_two_zone(zones, 0, (20.0, 20.0), (True, True), _constant(0.0), (_constant(30.0), _constant(30.0)), _constant(35), _constant(4.0), 7000, 1440, dhw=dhw)
+
+
+def check_dhw():
+    """The hot-water fraction pauses both zones' output without touching the thermostats, clamped to 0..1."""
+    failed = False
+    plain = _always_heating()
+    paused = _always_heating(dhw=lambda minute: 1.0 if minute < 60 else 0.0)
+    first_hour = range(12)
+    if any(paused["heat_watts"][index][step] != 0 for index in (0, 1) for step in first_hour) or any(paused["electric_watts"][step] != 0 for step in first_hour):
+        print("  ERROR: hot water should stop all output in the first hour, got {}".format(paused["heat_watts"][0][:12]))
+        failed = True
+    if not all(paused["heating"][index][step] for index in (0, 1) for step in first_hour):
+        print("  ERROR: hot water must not change the thermostat state")
+        failed = True
+    if not _kwh(paused["electric_watts"]) < _kwh(plain["electric_watts"]):
+        print("  ERROR: the pause should lower the day's electricity: {} vs {}".format(_kwh(paused["electric_watts"]), _kwh(plain["electric_watts"])))
+        failed = True
+    if paused["dhw"][:12] != [1.0] * 12 or paused["dhw"][12] != 0.0 or plain["dhw"] != [0.0] * len(plain["minute"]):
+        print("  ERROR: result dhw should hold the fraction used per step, got {} / {}".format(paused["dhw"][:13], plain["dhw"][:3]))
+        failed = True
+    over = _always_heating(dhw=_constant(1.7))
+    if sum(over["electric_watts"]) != 0 or over["dhw"][0] != 1.0:
+        print("  ERROR: a fraction above 1 should be treated as 1, got {} W".format(sum(over["electric_watts"])))
+        failed = True
+    under = _always_heating(dhw=_constant(-0.5))
+    if under["electric_watts"] != plain["electric_watts"] or under["dhw"][0] != 0.0:
+        print("  ERROR: a fraction below 0 should be treated as 0")
+        failed = True
+    half = _always_heating(dhw=_constant(0.5))
+    if abs(half["heat_watts"][0][0] - 500.0) > 1e-9:
+        print("  ERROR: a fraction of 0.5 should halve the output, got {}".format(half["heat_watts"][0][0]))
+        failed = True
+    return failed
+
+
+def check_controller():
+    """controller_reading maps and rounds the room temperature; zone 2's thermostat switches on the reading."""
+    failed = False
+    remote = {"controller": {"offset": 1.49, "slope": 1.09, "resolution": 1.0}}
+    cases = [
+        ({"controller": None}, 20.37, 20.37),
+        (remote, 20.5, 24.0),
+        ({"controller": {"offset": 23.5, "slope": 1.0, "resolution": 1.0}}, 0.0, 24.0),
+        ({"controller": {"offset": 22.5, "slope": 1.0, "resolution": 1.0}}, 0.0, 23.0),
+        ({"controller": {"offset": 1.0, "slope": 2.0, "resolution": 0.0}}, 10.3, 21.6),
+        ({"controller": {"offset": 0.0, "slope": 1.0, "resolution": 0.5}}, 20.3, 20.5),
+    ]
+    for zone, temp, expected in cases:
+        got = controller_reading(zone, temp)
+        if abs(got - expected) > 1e-9:
+            print("  ERROR: controller_reading({}, {}) = {}, expected {}".format(zone["controller"], temp, got, expected))
+            failed = True
+
+    # Zone 2 cools from 21.3C with the remote at target 24 and no hysteresis: the reading first reaches 24 below 21.110C
+    # (1.49 + 1.09 x 21.110 = 24.5); on the room's own scale it would have started at once.
+    zones = [_zone(hysteresis_off=99), _zone(heat_output=3000.0, hysteresis=0.0, hysteresis_off=0.0, controller=remote["controller"])]
+    result = simulate_two_zone(zones, 0, (20.0, 21.3), (False, False), _constant(0.0), (_constant(0.0), _constant(24.0)), _constant(35), _constant(4.0), 7000, 240)
+    first = result["heating"][1].index(True) if True in result["heating"][1] else None
+    before = None if not first else result["temp"][1][first - 1]
+    if before is None or not (21.02 < before <= 21.110):
+        print("  ERROR: zone 2 should start heating once the room is just below 21.11C, started at step {} from {}".format(first, before))
+        failed = True
+    return failed
+
+
+def check_valve():
+    """valve_factor: full output below the band, none above it, linear in between."""
+    failed = False
+    zone = {"valve": {"temperature": 20.7, "band": 1.0}}
+    for temp, expected in ((20.0, 1.0), (20.2, 1.0), (20.7, 0.5), (20.95, 0.25), (21.2, 0.0), (21.3, 0.0)):
+        got = valve_factor(zone, temp)
+        if abs(got - expected) > 1e-9:
+            print("  ERROR: valve_factor at {} = {}, expected {}".format(temp, got, expected))
+            failed = True
+    if valve_factor({"valve": None}, 30.0) != 1.0:
+        print("  ERROR: without a valve the factor should be 1")
+        failed = True
+    zones = [_zone(heat_output=1000.0, valve={"temperature": 20.7, "band": 1.0}), _zone()]
+    result = simulate_two_zone(zones, 0, (20.7, 20.0), (True, False), _constant(0.0), (_constant(30.0), _constant(0.0)), _constant(35), _constant(4.0), 7000, 5)
+    if abs(result["heat_watts"][0][0] - 500.0) > 1e-9 or not result["heating"][0][0]:
+        print("  ERROR: zone 1 at the valve temperature should deliver half its output and keep calling, got {}".format(result["heat_watts"][0][0]))
+        failed = True
+    return failed
+
+
 def run_pure_checks():
     """All the pure-model checks; True when any failed."""
     failed = False
-    for name, check in (("parse", check_parse), ("relaxation", check_relaxation), ("coupling", check_coupling), ("thermostats", check_thermostats), ("outputs", check_outputs), ("golden", check_golden)):
+    for name, check in (("parse", check_parse), ("relaxation", check_relaxation), ("coupling", check_coupling), ("thermostats", check_thermostats), ("outputs", check_outputs), ("golden", check_golden), ("dhw", check_dhw), ("controller", check_controller), ("valve", check_valve)):
         print("Test: predheat two-zone {}".format(name))
         failed = check() or failed
     return failed

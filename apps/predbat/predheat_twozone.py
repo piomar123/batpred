@@ -17,6 +17,8 @@ temperature. Pure functions: no Home Assistant or Predbat calls, so the offline 
 same model as the live forecast.
 """
 
+import math
+
 ZONE_NAMES = ("zone1", "zone2")
 REQUIRED_KEYS = ("heat_loss_watts", "heat_capacity_kwh", "heat_output")
 ENTITY_KEYS = ("internal_temperature", "target_temperature", "heating_active")
@@ -134,7 +136,36 @@ def parse_two_zone_config(cfg):
     return zones, coupling, []
 
 
-def simulate_two_zone(zones, coupling_watts, start_temps, start_heating, external, targets, flow_temp, cop, heat_max_power, minutes, step=5):
+def controller_reading(zone, temp):
+    """
+    What the zone's thermostat reads for a room temperature.
+
+    Without a controller block that is the room temperature itself; with one it is offset + slope x temp, rounded
+    to the nearest multiple of resolution (halves round up; resolution 0 means no rounding).
+    """
+    controller = zone.get("controller")
+    if not controller:
+        return temp
+    reading = controller["offset"] + controller["slope"] * temp
+    resolution = controller["resolution"]
+    if resolution > 0:
+        reading = math.floor(reading / resolution + 0.5) * resolution
+    return reading
+
+
+def valve_factor(zone, temp):
+    """
+    Share of the zone's emitter output its radiator valves let through at a room temperature.
+
+    1 without a valve block; with one, 1 below temperature - band / 2, 0 above temperature + band / 2, linear between.
+    """
+    valve = zone.get("valve")
+    if not valve:
+        return 1.0
+    return min(max((valve["temperature"] + valve["band"] / 2.0 - temp) / valve["band"], 0.0), 1.0)
+
+
+def simulate_two_zone(zones, coupling_watts, start_temps, start_heating, external, targets, flow_temp, cop, heat_max_power, minutes, step=5, dhw=None):
     """
     Simulate both zones forward in steps of `step` minutes for `minutes` minutes.
 
@@ -144,30 +175,35 @@ def simulate_two_zone(zones, coupling_watts, start_temps, start_heating, externa
     (W, 0 or None for no cap) caps the two zones' total output, scaling both down in proportion.
 
     Each step applies the thermostats (stop at target + hysteresis, start at target - hysteresis_off, the
-    first step included), the emitter outputs, then advances the room temperatures. Returns a dict of lists,
-    one entry per step: "minute", "external", "temp" (per zone, after the step), "target", "heating" and
-    "heat_watts" (per zone), and "electric_watts".
+    first step included) on what each zone's controller reads (controller_reading), the emitter outputs times
+    the zone's valve_factor, times 1 - dhw(minute) (the share of the step the heat pump spends on the hot-water
+    tank, clamped to 0..1; None for none), then the cap, then advances the room temperatures. Hot water never
+    changes a thermostat's state. Returns a dict of lists, one entry per step: "minute", "external", "temp"
+    (per zone, after the step), "target", "heating" and "heat_watts" (per zone), "dhw" and "electric_watts".
     """
     temps = [float(start_temps[0]), float(start_temps[1])]
     heating = [bool(start_heating[0]), bool(start_heating[1])]
     hours = step / 60.0
-    result = {"minute": [], "external": [], "temp": [[], []], "target": [[], []], "heating": [[], []], "heat_watts": [[], []], "electric_watts": []}
+    result = {"minute": [], "external": [], "temp": [[], []], "target": [[], []], "heating": [[], []], "heat_watts": [[], []], "dhw": [], "electric_watts": []}
 
     for minute in range(0, minutes, step):
         ext = external(minute)
         out_temp = min(max(int(ext + 0.5), -20), 20)
         heat = [0.0, 0.0]
+        pause = min(max(float(dhw(minute)), 0.0), 1.0) if dhw else 0.0
         for index, zone in enumerate(zones):
             target = targets[index](minute)
-            if heating[index] and temps[index] >= target + zone["hysteresis"]:
+            reading = controller_reading(zone, temps[index])
+            if heating[index] and reading >= target + zone["hysteresis"]:
                 heating[index] = False
-            elif not heating[index] and temps[index] <= target - zone["hysteresis_off"]:
+            elif not heating[index] and reading <= target - zone["hysteresis_off"]:
                 heating[index] = True
             if heating[index]:
                 if zone["heat_output_delta"]:
                     heat[index] = zone["heat_output"] * max(flow_temp(out_temp) - temps[index], 0.0) / zone["heat_output_delta"]
                 else:
                     heat[index] = zone["heat_output"]
+                heat[index] *= valve_factor(zone, temps[index]) * (1.0 - pause)
             result["target"][index].append(target)
             result["heating"][index].append(heating[index])
 
@@ -189,5 +225,6 @@ def simulate_two_zone(zones, coupling_watts, start_temps, start_heating, externa
 
         result["minute"].append(minute)
         result["external"].append(ext)
+        result["dhw"].append(pause)
         result["electric_watts"].append(electric)
     return result
