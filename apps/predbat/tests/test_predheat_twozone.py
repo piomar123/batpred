@@ -10,6 +10,7 @@
 """Tests for Predheat's two-zone model (predheat_twozone.py) and its wiring into PredHeat."""
 
 from predheat_twozone import parse_two_zone_config, parse_dhw_active, simulate_two_zone, controller_reading, valve_factor
+import predheat as predheat_module
 from predheat import PredHeat
 from datetime import datetime, timedelta, timezone
 
@@ -149,7 +150,7 @@ def check_parse_refit_keys(minimal):
             print("  ERROR: config {} should give an error containing '{}', got {} {}".format(cfg, expected, zones, errors))
             failed = True
 
-    for cfg, expected in (({"dhw_active": "sensor.aquarea_dhw_running"}, ("sensor.aquarea_dhw_running", [])), ({}, (None, [])), ({"dhw_active": None}, (None, []))):
+    for cfg, expected in (({"dhw_active": "sensor.dhw_running"}, ("sensor.dhw_running", [])), ({}, (None, [])), ({"dhw_active": None}, (None, []))):
         got = parse_dhw_active(cfg)
         if got != expected:
             print("  ERROR: parse_dhw_active({}) = {}, expected {}".format(cfg, got, expected))
@@ -391,7 +392,17 @@ def check_valve():
 def run_pure_checks():
     """All the pure-model checks; True when any failed."""
     failed = False
-    for name, check in (("parse", check_parse), ("relaxation", check_relaxation), ("coupling", check_coupling), ("thermostats", check_thermostats), ("outputs", check_outputs), ("golden", check_golden), ("dhw", check_dhw), ("controller", check_controller), ("valve", check_valve)):
+    for name, check in (
+        ("parse", check_parse),
+        ("relaxation", check_relaxation),
+        ("coupling", check_coupling),
+        ("thermostats", check_thermostats),
+        ("outputs", check_outputs),
+        ("golden", check_golden),
+        ("dhw", check_dhw),
+        ("controller", check_controller),
+        ("valve", check_valve),
+    ):
         print("Test: predheat two-zone {}".format(name))
         failed = check() or failed
     return failed
@@ -438,13 +449,15 @@ def _two_zone_args(**zone1_overrides):
     return dict(BASE_ARGS, two_zone={"coupling_watts": GOLDEN_CONFIG["coupling_watts"], "zone1": zone1, "zone2": dict(GOLDEN_CONFIG["zone2"])})
 
 
-def _run_update(my_predbat, predheat_args, history=None, states_now=None, zone1_room_items=None):
+def _run_update(my_predbat, predheat_args, history=None, states_now=None, zone1_room_items=None, ages=None, capture=None):
     """
     Run PredHeat.update_pred against faked inputs; returns (published states, log lines)
 
     The current states default to the zone 1 history values and a running zone 1 pump; states_now overrides
     them. zone1_room_items, when given, are the raw Home Assistant history of sensor.zone1_room, read through
-    the real minute_data_entity. record_status messages are logged as "STATUS: <message>".
+    the real minute_data_entity. record_status messages are logged as "STATUS: <message>". A history value
+    may be a dict (minutes ago -> value) instead of a constant; ages maps entity ids to their history age in
+    days (default 3). capture, when given, is a list that receives the start_temps passed to simulate_two_zone.
     """
     history = HISTORY if history is None else history
     current = {name: str(history[name]) for name in ("sensor.zone1_room", "sensor.zone1_target") if name in history}
@@ -453,6 +466,7 @@ def _run_update(my_predbat, predheat_args, history=None, states_now=None, zone1_
     states_now = current
     published = {}
     logs = []
+    real_simulate = predheat_module.simulate_two_zone
     original_log = my_predbat.log
     original_args = my_predbat.args.get("predheat", None)
     had_rate_import = hasattr(my_predbat, "rate_import")
@@ -479,7 +493,10 @@ def _run_update(my_predbat, predheat_args, history=None, states_now=None, zone1_
                 return real_minute_data(now_utc, key, incrementing=incrementing, smoothing=smoothing, scaling=scaling, entity_ids=entity_ids, **kwargs)
             if name not in history:
                 return {}, 0
-            return {minute: history[name] for minute in range(0, 3 * 24 * 60)}, 3
+            age = (ages or {}).get(name, 3)
+            if isinstance(history[name], dict):
+                return dict(history[name]), age
+            return {minute: history[name] for minute in range(0, 3 * 24 * 60)}, age
 
         def fake_weather(now_utc):
             """No forecast: Predheat holds the current outside temperature."""
@@ -487,8 +504,17 @@ def _run_update(my_predbat, predheat_args, history=None, states_now=None, zone1_
 
         predheat.minute_data_entity = fake_minute_data
         predheat.get_weather_data = fake_weather
+        if capture is not None:
+
+            def capturing_simulate(*args, **kwargs):
+                """Record start_temps, then run the real model."""
+                capture.append(tuple(args[2]))
+                return real_simulate(*args, **kwargs)
+
+            predheat_module.simulate_two_zone = capturing_simulate
         predheat.update_pred(scheduled=True)
     finally:
+        predheat_module.simulate_two_zone = real_simulate
         my_predbat.log = original_log
         if original_args is None:
             my_predbat.args.pop("predheat", None)
@@ -596,10 +622,58 @@ def check_wiring(my_predbat):
         print("  ERROR: expected two-zone outputs and a smart_thermostat warning, got {}".format(logs))
         failed = True
 
+    failed = check_wiring_refit(my_predbat) or failed
+
     print("Test: predheat without two_zone is unchanged single zone")
     published, logs = _run_update(my_predbat, dict(BASE_ARGS))
     if "predheat.volume_temp" not in published or "predheat.internal_temp_zone1" in published or any("two_zone" in line for line in logs):
         print("  ERROR: expected the plain single-zone run, got {} {}".format(sorted(published), [line for line in logs if "two_zone" in line]))
+        failed = True
+    return failed
+
+
+def check_wiring_refit(my_predbat):
+    """update_pred with the optional dhw_active and zone2.internal_temperature keys."""
+    failed = False
+    plain, _ = _run_update(my_predbat, _two_zone_args())
+
+    print("Test: predheat two-zone pauses heating while yesterday's hot water ran")
+    # Forecast minutes 65-120 replay minutes ago 1320-1375 (days_previous [1]): heat_energy_h1 unchanged, h2 lower
+    args = _two_zone_args()
+    args["two_zone"]["dhw_active"] = "sensor.dhw_running"
+    dhw_history = {minute: (1.0 if 1320 <= minute <= 1375 else 0.0) for minute in range(0, 3 * 24 * 60)}
+    published, logs = _run_update(my_predbat, args, history=dict(HISTORY, **{"sensor.dhw_running": dhw_history}), states_now={"sensor.dhw_running": "0"})
+    h1, h2 = published.get("predheat.heat_energy_h1", (None,))[0], published.get("predheat.heat_energy_h2", (None,))[0]
+    if h1 != plain["predheat.heat_energy_h1"][0] or h2 is None or not h2 < plain["predheat.heat_energy_h2"][0]:
+        print("  ERROR: expected h1 {} unchanged and h2 below {}, got {} {}".format(plain["predheat.heat_energy_h1"][0], plain["predheat.heat_energy_h2"][0], h1, h2))
+        failed = True
+    if not any("two_zone enabled" in line and "dhw_active sensor.dhw_running" in line for line in logs):
+        print("  ERROR: the enabled log line should name dhw_active, got {}".format([line for line in logs if "two_zone" in line]))
+        failed = True
+
+    print("Test: predheat two-zone runs without a pause when the hot-water sensor is unavailable")
+    published, logs = _run_update(my_predbat, args, states_now={"sensor.dhw_running": "unavailable"})
+    if not any("two_zone enabled" in line for line in logs) or published.get("predheat.heat_energy_h8") != plain["predheat.heat_energy_h8"]:
+        print("  ERROR: expected two_zone enabled and the plain output {}, got {} {}".format(plain["predheat.heat_energy_h8"], published.get("predheat.heat_energy_h8"), [line for line in logs if "two_zone" in line]))
+        failed = True
+
+    print("Test: predheat two-zone starts zone 2 from its own room sensor")
+    args = _two_zone_args()
+    args["two_zone"]["zone2"]["internal_temperature"] = "sensor.zone2_room"
+    capture = []
+    published, logs = _run_update(my_predbat, args, history=dict(HISTORY, **{"sensor.zone2_room": 21.0}), states_now={"sensor.zone2_room": "21.0"}, ages={"sensor.zone2_room": 1}, capture=capture)
+    if not capture or capture[0][1] != 21.0 or published.get("predheat.internal_temp", (None,))[0] != 21.0:
+        print("  ERROR: zone 2 should start from sensor.zone2_room 21.0, got start {} published {}".format(capture, published.get("predheat.internal_temp", (None,))[0]))
+        failed = True
+    if not any("two_zone enabled" in line and "1 days of history" in line for line in logs):
+        print("  ERROR: minute_data_age should include zone 2's room sensor (1 day), got {}".format([line for line in logs if "two_zone" in line]))
+        failed = True
+
+    print("Test: predheat two-zone falls back to single zone with zone 2's room sensor unavailable now")
+    published, logs = _run_update(my_predbat, args, history=dict(HISTORY, **{"sensor.zone2_room": 21.0}), states_now={"sensor.zone2_room": "unavailable"})
+    warnings = [line for line in logs if line.startswith("Warn: Predheat: two_zone ignored")]
+    if not warnings or "zone2 internal_temperature sensor.zone2_room is unavailable" not in warnings[0] or "predheat.internal_temp_zone1" in published:
+        print("  ERROR: expected the single-zone fallback naming zone2 internal_temperature, got {}".format(warnings))
         failed = True
     return failed
 

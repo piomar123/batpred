@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 import math
 import pytz
 from utils import str2time, dp2, dp3, minute_data, minutes_since_midnight, next_aligned_run, clock_change_minutes
-from predheat_twozone import parse_two_zone_config, simulate_two_zone
+from predheat_twozone import parse_dhw_active, parse_two_zone_config, simulate_two_zone
 
 from const import TIME_FORMAT
 
@@ -537,24 +537,34 @@ class PredHeat:
         if not errors and self.mode == "gas":
             errors = ["mode gas is not supported"]
         internal = target = {}
-        age_internal = age_target = 0
+        internal2 = None
+        ages = []
         if not errors:
             # A sensor that is unavailable now (and possibly for its whole history, which minute_data would fill
-            # with 0) must not start the forecast: zone 1 would heat from 0C
-            for key in ("internal_temperature", "target_temperature"):
-                entity_id = zones[0][key]
+            # with 0) must not start the forecast: the zone would heat from 0C
+            checks = [(0, "internal_temperature"), (0, "target_temperature")]
+            if zones[1]["internal_temperature"]:
+                checks.append((1, "internal_temperature"))
+            for index, key in checks:
+                entity_id = zones[index][key]
                 state = self.get_state(entity_id=entity_id, default=None)
                 try:
                     valid = math.isfinite(float(state))
                 except (TypeError, ValueError):
                     valid = False
                 if not valid:
-                    errors.append("zone1 {} {} is {}".format(key, entity_id, state))
+                    errors.append("{} {} {} is {}".format(zones[index]["name"], key, entity_id, state))
         if not errors:
             internal, age_internal = self.minute_data_entity(now_utc, "two_zone", smoothing=True, entity_ids=zones[0]["internal_temperature"])
             target, age_target = self.minute_data_entity(now_utc, "two_zone", entity_ids=zones[0]["target_temperature"])
+            ages = [age_internal, age_target]
             if not internal or not target:
                 errors = ["no history for zone1 internal_temperature or target_temperature"]
+            elif zones[1]["internal_temperature"]:
+                internal2, age_internal2 = self.minute_data_entity(now_utc, "two_zone", smoothing=True, entity_ids=zones[1]["internal_temperature"])
+                ages.append(age_internal2)
+                if not internal2:
+                    errors = ["no history for zone2 internal_temperature"]
         if errors:
             message = "Warn: Predheat: two_zone ignored, running single zone: {}".format("; ".join(errors))
             self.log(message)
@@ -562,12 +572,23 @@ class PredHeat:
             return
         if self.smart_thermostat:
             self.log("Warn: Predheat: smart_thermostat is not supported with two_zone and is ignored")
-        self.minute_data_age = min(self.minute_data_age, age_internal, age_target)
+        self.minute_data_age = min([self.minute_data_age] + ages)
         heating = [self.zone_heating_active(zone) for zone in zones]
-        self.two_zone = {"zones": zones, "coupling": coupling, "internal": internal, "target": target, "heating": heating}
+        # Hot water is optional: an unreadable sensor or missing history only means no pause in the forecast
+        dhw_entity = parse_dhw_active(config)[0]
+        dhw = {}
+        if dhw_entity:
+            dhw, age_dhw = self.minute_data_entity(now_utc, "two_zone", entity_ids=dhw_entity)
+            dhw = dhw or {}
+        self.two_zone = {"zones": zones, "coupling": coupling, "internal": internal, "target": target, "heating": heating, "dhw": dhw, "internal2": internal2}
+        extras = ""
+        if internal2:
+            extras += ", zone2 internal {} {}".format(zones[1]["internal_temperature"], dp3(internal2.get(0, 0)))
+        if dhw_entity:
+            extras += ", dhw_active {} ({})".format(dhw_entity, "history" if dhw else "no history, no pause")
         self.log(
-            "Predheat: two_zone enabled, zone1 internal temp {} target {} heating {}, zone2 heating {}, coupling {} W per degree, {} days of history".format(
-                dp3(internal.get(0, 0)), dp2(target.get(0, 0)), heating[0], heating[1], coupling, self.minute_data_age
+            "Predheat: two_zone enabled, zone1 internal temp {} target {} heating {}, zone2 heating {}, coupling {} W per degree{}, {} days of history".format(
+                dp3(internal.get(0, 0)), dp2(target.get(0, 0)), heating[0], heating[1], coupling, extras, self.minute_data_age
             )
         )
 
@@ -604,8 +625,15 @@ class PredHeat:
             """Effective COP: heat_cop scaled by the efficiency table, as in run_simulation's pump mode."""
             return self.heat_cop * self.heat_pump_efficiency.get(out_temp, self.heat_pump_efficiency_max) / self.heat_pump_efficiency_max
 
-        start = (two_zone["internal"].get(0, self.internal_temperature[0]), self.internal_temperature[0])
-        result = simulate_two_zone(two_zone["zones"], two_zone["coupling"], start, two_zone["heating"], external, (target_zone1, target_zone2), flow_temp, cop, self.heat_max_power, self.forecast_days * 24 * 60, PREDICT_STEP)
+        def dhw(minute):
+            """Share of the step the heat pump spends on hot water, replayed from history like the targets."""
+            return self.get_historical(two_zone["dhw"], minute, default=0)
+
+        internal2 = two_zone.get("internal2")
+        start = (two_zone["internal"].get(0, self.internal_temperature[0]), internal2.get(0, self.internal_temperature[0]) if internal2 else self.internal_temperature[0])
+        result = simulate_two_zone(
+            two_zone["zones"], two_zone["coupling"], start, two_zone["heating"], external, (target_zone1, target_zone2), flow_temp, cop, self.heat_max_power, self.forecast_days * 24 * 60, PREDICT_STEP, dhw=dhw if two_zone.get("dhw") else None
+        )
 
         heat_energy = self.heat_energy_today
         cost = self.import_today_cost
@@ -637,7 +665,7 @@ class PredHeat:
 
         prefix = self.prefix
         celsius = {"state_class": "measurement", "unit_of_measurement": "°C"}
-        self.set_state(prefix + ".internal_temp", state=dp2(self.internal_temperature[0]), attributes=dict(celsius, results=stamps["internal"], friendly_name="Internal Temperature Predicted"))
+        self.set_state(prefix + ".internal_temp", state=dp2(start[1]), attributes=dict(celsius, results=stamps["internal"], friendly_name="Internal Temperature Predicted"))
         self.set_state(prefix + ".internal_temp_zone1", state=dp2(start[0]), attributes=dict(celsius, results=stamps["internal_zone1"], friendly_name="Zone 1 Internal Temperature Predicted"))
         self.set_state(prefix + ".external_temp", state=dp2(self.external_temperature[0]), attributes=dict(celsius, results=stamps["external"], friendly_name="External Temperature Predicted"))
         self.set_state(prefix + ".target_temp", state=dp2(minutes["target"][0]), attributes=dict(celsius, results=stamps["target"], friendly_name="Target Temperature Predicted"))

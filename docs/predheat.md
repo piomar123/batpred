@@ -209,6 +209,23 @@ from `heat_pump_efficiency` and `heat_cop`, as in single-zone pump mode. `heat_e
 `volume_temp` is not published in this mode. Gas mode and `smart_thermostat` are not supported with `two_zone`; an
 invalid block, a first zone without history, or a first zone whose temperature or target is unavailable at the time, logs a warning (also shown on Predbat's status) and Predheat falls back to the single-zone model.
 
+Optional keys, all off when absent:
+
+- `dhw_active: sensor.dhw_running` (top level of `two_zone`): an entity that is 1 while the heat pump heats the
+  hot-water tank and 0 otherwise. Its history is replayed like the targets (from `days_previous`), and while it is
+  on both zones' output is paused; the thermostats keep calling, so the rooms catch up afterwards. A sensor with no
+  history simply means no pause.
+- `zone2.internal_temperature`: a room sensor for the second zone in place of the top-level `internal_temperature`,
+  for when the thermostat's own sensor does not read the room's temperature. Heat loss, gains and coupling then act
+  on this sensor's scale. If it is unavailable at the time Predheat falls back to the single-zone model.
+- `controller: {offset, slope, resolution}` (either zone): what the zone's thermostat reads for a room temperature
+  T, `offset + slope * T`, rounded to the nearest `resolution` (0 for none; halves round up). The thermostat compares
+  that reading with the zone's target, so a thermostat that reads 3 degrees high in whole degrees can be modelled
+  while the room stays on its own scale. Defaults: offset 0, slope 1, resolution 0.
+- `valve: {temperature, band}` (either zone): radiator valves that close gradually as the room warms. The zone's
+  output is scaled by 1 below `temperature - band / 2`, 0 above `temperature + band / 2` and linearly in between;
+  the zone's thermostat still decides whether it calls for heat.
+
 ### Link Predheat to Predbat
 
 Add a **load_forecast** entry in `apps.yaml` to configure Predbat to use the [Predheat load forecast](apps-yaml.md#load-forecast):
