@@ -110,9 +110,9 @@ def test_rate_reaches_start_service(test_name, my_predbat):
 def test_rate_held_like_a_register(test_name, my_predbat):
     """A rate Predbat holds moves as a register would - a small change is held - except that any move to or from 0 goes through."""
     print("**** Running Test: {} ****".format(test_name))
-    inv = _build_script_inverter(my_predbat, rate_max=10000)  # a 500W deadband
+    inv = _build_script_inverter(my_predbat, rate_max=10000)  # a 200W deadband (local 2%; upstream 5% = 500W)
     failed = False
-    for rate, expect in ((1300, 1300), (900, 1300), (0, 0), (400, 400), (600, 400), (2000, 2000)):
+    for rate, expect in ((1300, 1300), (1150, 1300), (0, 0), (400, 400), (600, 400), (2000, 2000)):
         inv.adjust_charge_rate(rate, notify=False)
         failed |= _check(test_name, "charge rate read back after setting {}W".format(rate), inv.get_current_charge_rate(), expect)
     failed |= _check(test_name, "charge_start_service power", _service_power(my_predbat, inv, "charge"), [2000])
