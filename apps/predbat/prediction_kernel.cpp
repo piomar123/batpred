@@ -69,7 +69,8 @@
 // ABI 12 (main): the charge and discharge curves are rate grid curve rows of PK_CURVE_WIDTH (the battery rate grids).
 // ABI 14: the car cancel branch's ABI 13 merged with main's ABI 12 - the cancel table and the PK_CURVE_WIDTH curve rows.
 // ABI 15: PkContext gained export_budget_mode, export_budget_cap and the export budget seed at the end.
-#define PK_ABI_VERSION 15
+// Fork (tools/fork/rebuild.sh): local ABI 1015 = 1000 + 15 for this combination of branches.
+#define PK_ABI_VERSION 1015
 #define PK_CURVE_WIDTH 103 // a rate grid curve row: 101 SoC percents, the rated rate, then the absolute temperature cap
 // Parity 14: the explicit (mode, target, power) fields replace the packed double throughout the hot
 // loop (see the ABI 6 note); the floor a target exports to now reads the target field, matching
@@ -103,7 +104,8 @@
 // export_budget.py; a capped step recomputes the grid balance before the iBoost solar excess.
 // Parity 26: pv_origin holds the PV part of the stored energy at export_budget_cap (export_budget.py), in the
 // seed and after every step, so a battery bigger than the export allowance stores the rest as grid.
-#define PK_PARITY_REVISION 26
+// Fork (tools/fork/rebuild.sh): local parity 1026 = 1000 + 26.
+#define PK_PARITY_REVISION 1026
 #define PK_MAX_CARS 8
 #define PK_CANCEL_MAX_SLOTS 64 // Must equal car_cancel.py CAR_CANCEL_MAX_SLOTS (it sizes PkContext's cancel arrays), so a change to either needs an ABI bump - the cancelled set is a 64-bit mask
 #define PK_RUN_EVERY 5 // const.py RUN_EVERY

@@ -35,12 +35,12 @@ from utils import net_settlement_seed_from, in_car_slot, in_iboost_slot
 # Expected ABI/parity revisions of the shared library (see prediction_kernel.cpp)
 # ABI 11: scalar results come back already rounded to 4dp. ABI 13 (car cancel branch) adds the car slot cancel table and cancel_floor_kw to
 # PkContext; ABI 12 (main) the rate grid curve rows; ABI 14 is both. ABI 15: the export budget fields at the end of PkContext.
-KERNEL_ABI_VERSION = 15
+KERNEL_ABI_VERSION = 1015
 # Parity 22 (car cancel branch): an export over a cancellable car slot cancels it - car load off, buy-back penalty, dispatch rate reverted -
 # merged with main's parity 20. Parity 23 (main): the battery rate grids. Parity 24: both.
 # Parity 25: the optional export energy budget (export_budget_mode) caps forced battery export.
 # Parity 26: pv_origin holds the PV part of the stored energy at the export budget cap.
-KERNEL_PARITY_REVISION = 26
+KERNEL_PARITY_REVISION = 1026
 
 # Maximum number of cars supported by the kernel (PK_MAX_CARS in prediction_kernel.cpp)
 KERNEL_MAX_CARS = PREDBAT_MAX_CARS
