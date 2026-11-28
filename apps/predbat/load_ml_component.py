@@ -153,6 +153,8 @@ class LoadMLComponent(ComponentBase):
             load_success = self.predictor.load(self.model_filepath)
             if load_success:
                 self.log("ML Component: Loaded existing model")
+                # Until it next trains the model only predicts: keep the float16 copy and free the rest, which train() reloads from the file
+                self.predictor.release_training_state()
                 # Check if model is still valid
                 is_valid, reason = self.predictor.is_valid(validation_threshold=self.ml_validation_threshold, max_age_hours=self.ml_max_model_age_hours)
                 if is_valid:
@@ -796,6 +798,10 @@ class LoadMLComponent(ComponentBase):
                 self.log("ML Component: Starting initial training")
             else:
                 self.log("ML Component: Initial training is required, delaying until component has started")
+                # Deferring is healthy: without a success timestamp components.is_alive() reads the
+                # component as dead and the next plan run reports it as a component error until
+                # training starts on the following tick (e.g. after a MODEL_VERSION bump).
+                self.update_success_timestamp()
                 return True
         elif should_train:
             self.log("ML Component: Starting fine-tune training ({:g}h interval), model age is {} hours".format(self.ml_retrain_interval_seconds / 3600.0, retrain_age_seconds / 3600.0))
@@ -1083,9 +1089,9 @@ class LoadMLComponent(ComponentBase):
                     self.model_status = "fallback_validation"
                     self.log("Warn: ML Component: Validation MAE ({:.4f}) exceeds threshold ({:.4f})".format(val_mae, self.ml_validation_threshold))
 
-                # Save model (fast - no lock needed)
-                if self.model_filepath:
-                    self.predictor.save(self.model_filepath)
+                # Save model (fast - no lock needed), then free the training state until the next training reloads it from the file
+                if self.model_filepath and self.predictor.save(self.model_filepath):
+                    self.predictor.release_training_state()
             else:
                 self.log("Warn: ML Component: Training failed")
 

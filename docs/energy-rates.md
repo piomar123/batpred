@@ -290,25 +290,28 @@ In `apps.yaml` configure the following lines:
 e.g. (for DNO region A)
 
 ```yaml
-  rates_import_octopus_url : "https://api.octopus.energy/v1/products/FLUX-IMPORT-23-02-14/electricity-tariffs/E-1R-FLUX-IMPORT-23-02-14-A/standard-unit-rates"
-  rates_import_octopus_url : "https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-A/standard-unit-rates"
+  rates_import_octopus_url : "https://api.oegb-kraken.energy/v1/products/FLUX-IMPORT-23-02-14/electricity-tariffs/E-1R-FLUX-IMPORT-23-02-14-A/standard-unit-rates"
+  rates_import_octopus_url : "https://api.oegb-kraken.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-A/standard-unit-rates"
 
-  rates_export_octopus_url: "https://api.octopus.energy/v1/products/FLUX-EXPORT-23-02-14/electricity-tariffs/E-1R-FLUX-EXPORT-23-02-14-A/standard-unit-rates"
-  rates_export_octopus_url: "https://api.octopus.energy/v1/products/AGILE-OUTGOING-19-05-13/electricity-tariffs/E-1R-AGILE-OUTGOING-19-05-13-A/standard-unit-rates/"
+  rates_export_octopus_url: "https://api.oegb-kraken.energy/v1/products/FLUX-EXPORT-23-02-14/electricity-tariffs/E-1R-FLUX-EXPORT-23-02-14-A/standard-unit-rates"
+  rates_export_octopus_url: "https://api.oegb-kraken.energy/v1/products/AGILE-OUTGOING-19-05-13/electricity-tariffs/E-1R-AGILE-OUTGOING-19-05-13-A/standard-unit-rates/"
 ```
 
 If you configure the rates_import_octopus_url then Predbat will use this instead of metric_octopus or rates_import.
 Similarly, rates_export_octopus_url takes precedence over metric_octopus_export or rates_export.
 
-A full list of available Octopus products is at <https://api.octopus.energy/v1/products/>.
+Octopus has moved its API from `api.octopus.energy` to `api.oegb-kraken.energy`, and the old address will stop working in due course.
+If your URLs still use `api.octopus.energy`, Predbat fetches them from the new address for you and logs a reminder; change them to `api.oegb-kraken.energy` when convenient.
+
+A full list of available Octopus products is at <https://api.oegb-kraken.energy/v1/products/>.
 
 If you view this page, search for the tariff by name, then copy the URL it shows into a new tab.
 
-E.g. <https://api.octopus.energy/v1/products/GO-VAR-22-10-14/>
+E.g. <https://api.oegb-kraken.energy/v1/products/GO-VAR-22-10-14/>
 
 Look through that page to find the right URL for usage charges in your DNO area
 
-<https://api.octopus.energy/v1/products/GO-VAR-22-10-14//electricity-tariffs/E-1R-GO-VAR-22-10-14-A/standard-unit-rates>
+<https://api.oegb-kraken.energy/v1/products/GO-VAR-22-10-14/electricity-tariffs/E-1R-GO-VAR-22-10-14-A/standard-unit-rates>
 
 (For area A)
 
@@ -725,6 +728,8 @@ You should sign up for the Axle 'Events Only' service, not 'Full Control' which 
 Once signed up to Axle, Predbat's [Axle Energy VPP component](https://springfall2008.github.io/batpred/components/#axle-energy-vpp-axle) polls the Axle API to obtain details of future events and add Axle event details to **binary_sensor.predbat_axle_event**.
 
 During an Axle export event, **axle_pence_per_kwh** is added to both your export rate and your import rate for the event period. This reflects that importing (charging) instead of exporting during the event carries the same opportunity cost as missing out on the payment, so Predbat will not plan to charge cheaply through an event just because your normal import rate happens to be low at that time.
+
+The same boost is applied to every tariff in the [tariff comparison](compare.md#running-a-comparison), so an Axle event doesn't make your current tariff look better than the others.
 
 The following configuration options for the Axle VPP can be set in `apps.yaml`:
 

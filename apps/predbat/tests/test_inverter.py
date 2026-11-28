@@ -118,6 +118,125 @@ def test_solis_energy_control(test_name, my_predbat, ha, inverter_type, switch_s
     return failed
 
 
+def test_solis_gs_current_hold(my_predbat, ha):
+    """
+    A GS hold at 0 A survives every other writer of the timed current, in both directions, end to end on a real Inverter (#5972).
+
+    GS has no target SoC, so a hold at the target is mimic_target_soc writing 0 A to the timed current. In
+    execute_plan apply_inverter_rates then calls adjust_charge_rate / adjust_discharge_rate, whose #4415
+    re-assert used to write the full current straight back, and a forced export or a re-enabled charge
+    window wrote it before mimic_target_soc each cycle. cycle() runs one execute_plan's worth in order:
+    start the hold cycle, the in-loop body, end the hold cycle, then the rate pass. Each step is
+    (description, action, expected charge current, expected discharge current, expected register writes or
+    None), with the battery at 50 V.
+    """
+    failed = False
+    print("Test: solis_gs_current_hold")
+    charge_entity = "number.timed_charge_current"
+    discharge_entity = "number.timed_discharge_current"
+    touched = ["select.solis_energy_storage_control_switch", "number.charge_limit", charge_entity, discharge_entity]
+    saved_items = {key: ha.dummy_items[key] for key in touched if key in ha.dummy_items}
+    saved_args = copy.deepcopy(my_predbat.args)
+    try:
+        my_predbat.args["inverter_type"] = ["GS"]
+        my_predbat.args["energy_control_switch"] = "select.solis_energy_storage_control_switch"
+        my_predbat.args["timed_charge_current"] = charge_entity
+        my_predbat.args["timed_discharge_current"] = discharge_entity
+        ha.dummy_items["select.solis_energy_storage_control_switch"] = "Self-Use"
+        ha.dummy_items["number.charge_limit"] = 100
+        ha.dummy_items[charge_entity] = 60.0
+        ha.dummy_items[discharge_entity] = 60.0
+
+        inv = Inverter(my_predbat, 0, quiet=True)
+        inv.sleep = dummy_sleep
+        inv.rest_data = None
+        inv.rest_api = None
+        inv.battery_voltage = 50.0
+        inv.inv_current_dp = 1
+
+        def at_soc(soc, action):
+            """Set the SoC, then run action."""
+            inv.soc_percent = soc
+            action()
+
+        # The rates are the inverter's maxima, which the rate entities Predbat creates for GS are seeded with
+        charge_w = inv.battery_rate_max_charge * MINUTE_WATT
+        discharge_w = inv.battery_rate_max_discharge * MINUTE_WATT
+        full_charge = round(charge_w / 50.0, 1)
+        full_discharge = round(discharge_w / 50.0, 1)
+        rates = lambda: (inv.adjust_charge_rate(charge_w), inv.adjust_discharge_rate(discharge_w))
+
+        def cycle(*body):
+            """One execute_plan: start the hold cycle, run the in-loop body, end the hold cycle, then the rate pass."""
+            inv.start_current_hold_cycle()
+            for action in body:
+                action()
+            inv.end_current_hold_cycle()
+            rates()
+
+        hold_charge = lambda: inv.adjust_battery_target(50, isCharging=True)
+        hold_export = lambda: inv.adjust_battery_target(50, isExporting=True)
+        # The writers that run before mimic_target_soc in the loop: a re-enabled charge window and a forced export
+        enable_charge = lambda: inv.enable_charge_discharge_with_time_current("charge", True)
+        enable_export = lambda: inv.enable_charge_discharge_with_time_current("discharge", True)
+        steps = [
+            ("rates with no hold", rates, full_charge, full_discharge, None),
+            ("charge hold at the target", lambda: at_soc(50, lambda: cycle(hold_charge)), 0.0, full_discharge, None),
+            ("renewed hold: no writer lifts it and nothing is written", lambda: cycle(enable_charge, hold_charge), 0.0, full_discharge, 0),
+            ("60 s rebalance between cycles keeps the hold", rates, 0.0, full_discharge, 0),
+            ("a cycle that does not renew the hold restores the current, with no rate pass needed", lambda: (inv.start_current_hold_cycle(), inv.end_current_hold_cycle()), full_charge, full_discharge, None),
+            ("charge hold above the target (grid charge off)", lambda: at_soc(60, lambda: cycle(hold_charge)), 0.0, full_discharge, None),
+            ("below the target the hold ends within the cycle", lambda: at_soc(40, lambda: cycle(enable_charge, hold_charge)), full_charge, full_discharge, None),
+            ("export hold at the target", lambda: at_soc(50, lambda: cycle(enable_export, hold_export)), full_charge, 0.0, None),
+            ("renewed export hold: the forced export does not lift it and nothing is written", lambda: cycle(enable_export, hold_export), full_charge, 0.0, 0),
+            ("above the export target the hold ends within the cycle", lambda: at_soc(60, lambda: cycle(enable_export, hold_export)), full_charge, full_discharge, None),
+            ("export hold again", lambda: at_soc(50, lambda: cycle(hold_export)), full_charge, 0.0, None),
+            ("plan leaves export within the cycle: mimic's ECO path releases the hold", lambda: cycle(lambda: inv.adjust_battery_target(100)), full_charge, full_discharge, None),
+            ("export hold before dipping below its target", lambda: at_soc(50, lambda: cycle(hold_export)), full_charge, 0.0, None),
+            ("below the export target the end of the cycle restores the current", lambda: at_soc(40, lambda: (inv.start_current_hold_cycle(), hold_export(), inv.end_current_hold_cycle())), full_charge, full_discharge, None),
+            ("charge hold for the rate-pass test", lambda: at_soc(50, lambda: cycle(hold_charge)), 0.0, full_discharge, None),
+            ("unrenewed hold the rate pass will write is only released: no write here", lambda: (inv.start_current_hold_cycle(), inv.end_current_hold_cycle(rate_pass_writes={"charge", "discharge"})), 0.0, full_discharge, 0),
+            ("then the rate pass writes the current", rates, full_charge, full_discharge, None),
+            ("charge hold for the read-only test", lambda: at_soc(50, lambda: cycle(hold_charge)), 0.0, full_discharge, None),
+            ("read-only writes nothing and keeps the hold", lambda: (inv.start_current_hold_cycle(), inv.end_current_hold_cycle(read_only=True)), 0.0, full_discharge, 0),
+            ("a rebalance during read-only cannot lift it", lambda: inv.adjust_charge_rate(charge_w), 0.0, full_discharge, 0),
+            ("battery voltage unknown: the hold is kept, as the restore can not be written", lambda: (setattr(inv, "battery_voltage", None), inv.start_current_hold_cycle(), inv.end_current_hold_cycle()), 0.0, full_discharge, 0),
+            (
+                "battery voltage unknown with a rate pass due: still kept, as the re-assert can not write either",
+                lambda: (setattr(inv, "battery_voltage", None), inv.start_current_hold_cycle(), inv.end_current_hold_cycle(rate_pass_writes={"charge", "discharge"})),
+                0.0,
+                full_discharge,
+                0,
+            ),
+            ("first control cycle afterwards restores it", lambda: (setattr(inv, "battery_voltage", 50.0), inv.start_current_hold_cycle(), inv.end_current_hold_cycle()), full_charge, full_discharge, None),
+            ("hold for the reset test", lambda: at_soc(50, lambda: cycle(hold_charge, hold_export)), 0.0, 0.0, None),
+            ("an export-only reset releases only the export hold", lambda: (inv.release_current_holds(["discharge"]), rates()), 0.0, full_discharge, None),
+            ("voltage unknown: a release keeps the hold, as the write after it can not happen", lambda: (setattr(inv, "battery_voltage", None), inv.release_current_holds(), setattr(inv, "battery_voltage", 50.0), rates()), 0.0, full_discharge, None),
+            ("reset or calibration releases every hold before writing full rates", lambda: (inv.release_current_holds(), rates()), full_charge, full_discharge, None),
+        ]
+        for description, action, expect_charge, expect_discharge, expect_writes in steps:
+            writes_before = inv.count_register_writes
+            action()
+            charge_current = ha.get_state(charge_entity)
+            discharge_current = ha.get_state(discharge_entity)
+            if charge_current != expect_charge or discharge_current != expect_discharge:
+                print("ERROR: solis_gs_current_hold: {}: currents should be charge {} discharge {}, got {} {}".format(description, expect_charge, expect_discharge, charge_current, discharge_current))
+                failed = True
+            writes = inv.count_register_writes - writes_before
+            if expect_writes is not None and writes != expect_writes:
+                print("ERROR: solis_gs_current_hold: {}: expected {} register writes, got {}".format(description, expect_writes, writes))
+                failed = True
+    finally:
+        my_predbat.args.clear()
+        my_predbat.args.update(saved_args)
+        for key in touched:
+            if key in saved_items:
+                ha.dummy_items[key] = saved_items[key]
+            else:
+                ha.dummy_items.pop(key, None)
+    return failed
+
+
 def test_custom_type_respects_configured_time_entity(my_predbat):
     """
     Regression test for issue #4738: for an inverter type whose charge_time_format is not
@@ -1919,13 +2038,220 @@ def test_adjust_ge_eco_toggle(test_name, ha, inv, prev_eco_state, force_export, 
     return failed
 
 
+def test_adjust_ge_eco_toggle_warns_once(ha, inv):
+    """
+    An eco toggle that cannot be written is warned about once, not every cycle (#4909).
+
+    A mode select bound in place of the enable_eco_mode switch has no turn_on service, so writing it would
+    retry an invalid call; an inverter_mode that is not configured at all has nothing to write. Both are
+    skipped with a single warning, which is said again only once the problem changes or has been fixed and
+    comes back. An empty entry in a configured inverter_mode is deliberate - GE Cloud leaves one for a
+    3-phase inverter, which has no eco mode, and for one that exports at full power in eco mode (#6005) -
+    so it is skipped without a warning.
+    """
+    failed = False
+    print("Test: eco_toggle_warns_once")
+
+    # refresh_config() below re-derives the inverter's whole state, so all of it is put back afterwards
+    orig_inv_state = dict(inv.__dict__)
+    orig_args = {key: (list(value) if isinstance(value, list) else value) for key, value in inv.base.args.items()}
+    orig_log = inv.base.log
+    orig_record_status = inv.base.record_status
+    orig_dummy_items = dict(ha.dummy_items)
+
+    inv.inv_has_ge_eco_toggle = True
+    inv.inv_has_ge_inverter_mode = False
+    inv.eco_toggle_warned = None
+    inv.rest_data = None
+    inv.rest_api = None
+    log_messages = []
+    status_errors = []
+    sleeps = []
+    inv.base.log = lambda msg, *args, **kwargs: log_messages.append(str(msg))
+    inv.log = lambda msg, *args, **kwargs: log_messages.append(str(msg))
+    inv.base.record_status = lambda msg, had_errors=False, **kwargs: status_errors.append(str(msg)) if had_errors else None
+    inv.sleep = lambda seconds: sleeps.append(seconds)
+    # Every switch write is recorded, so a refused binding can be shown never to reach one
+    switch_writes = []
+    real_write_and_poll_switch = inv.write_and_poll_switch
+
+    def recording_write_and_poll_switch(name, entity_id, new_value):
+        """Record the write, then carry it out."""
+        switch_writes.append(entity_id)
+        return real_write_and_poll_switch(name, entity_id, new_value)
+
+    inv.write_and_poll_switch = recording_write_and_poll_switch
+
+    def warnings(text):
+        """How many warnings so far mention text."""
+        return sum(1 for msg in log_messages if msg.startswith("Warn:") and text in msg)
+
+    try:
+        # No switch at all: one warning across several cycles, in both directions
+        # A cycle's refresh_config() runs between the calls, as execute does, and must not reset the warning
+        inv.base.args.pop("inverter_mode", None)
+        for force_export in [False, False, True, False]:
+            inv.adjust_inverter_mode(force_export)
+            inv.refresh_config(quiet=True)
+            inv.inv_has_ge_eco_toggle = True
+            inv.inv_has_ge_inverter_mode = False
+            inv.rest_data = None
+            inv.rest_api = None
+            inv.base.args.pop("inverter_mode", None)
+        if warnings("No entity_id for ECO Toggle") != 1:
+            print("ERROR: expected one missing-switch warning over four cycles, got {}: {}".format(warnings("No entity_id for ECO Toggle"), log_messages))
+            failed = True
+        if any("current mode is" in msg for msg in log_messages):
+            print("ERROR: a missing eco toggle should not log a mode change every cycle: {}".format(log_messages))
+            failed = True
+        if status_errors:
+            print("ERROR: a missing inverter_mode should only be logged, not be a status error: {}".format(status_errors))
+            failed = True
+        # Nothing can be written, so the window-change sleep that waits for the write to settle is skipped too
+        inv.adjust_inverter_mode(True, changed_start_end=True)
+        if sleeps:
+            print("ERROR: adjust_inverter_mode slept {} with no eco toggle to write".format(sleeps))
+            failed = True
+
+        # An empty entry in a configured inverter_mode, as GE Cloud leaves it, in each form it can take: skipped
+        # with no warning, no status error, no sleep and no write
+        for empty in [None, "", [None], ["switch.other_inverter_eco", None]]:
+            warnings_before = sum(1 for msg in log_messages if msg.startswith("Warn:"))
+            errors_before = len(status_errors)
+            del sleeps[:]
+            # Forget the missing-config warning above, so a warning here would be seen rather than deduplicated
+            inv.eco_toggle_warned = None
+            inv.base.args["inverter_mode"] = empty
+            inv.id = 1 if isinstance(empty, list) and len(empty) > 1 else 0
+            for force_export in [True, False]:
+                inv.adjust_inverter_mode(force_export, changed_start_end=True)
+            inv.id = orig_inv_state["id"]
+            if sum(1 for msg in log_messages if msg.startswith("Warn:")) != warnings_before or len(status_errors) != errors_before or sleeps:
+                print("ERROR: an empty inverter_mode entry {} should be skipped quietly: logs {} status {} sleeps {}".format(empty, log_messages[-3:], status_errors[errors_before:], sleeps))
+                failed = True
+            if any("current mode is" in msg for msg in log_messages):
+                print("ERROR: an empty inverter_mode entry {} should not log a mode change: {}".format(empty, log_messages))
+                failed = True
+
+        # A mode select bound in its place: a new problem, so warned once, and never written
+        inv.base.args["inverter_mode"] = "select.givtcp_mode"
+        ha.dummy_items["select.givtcp_mode"] = "Export (Paused)"
+        for force_export in [False, True, False]:
+            inv.adjust_inverter_mode(force_export)
+        if warnings("is not a switch") != 1:
+            print("ERROR: expected one not-a-switch warning over three cycles, got {}: {}".format(warnings("is not a switch"), log_messages))
+            failed = True
+        if ha.get_state("select.givtcp_mode") != "Export (Paused)":
+            print("ERROR: the select should not have been written, now {}".format(ha.get_state("select.givtcp_mode")))
+            failed = True
+        # A wrong entity is a configuration error, so the status keeps showing it every cycle
+        if len(status_errors) != 3:
+            print("ERROR: expected a status error on each of three cycles with a select bound, got {}".format(status_errors))
+            failed = True
+
+        # A fixed value is reported as one, not as an entity of the wrong kind, and is a status error too
+        errors_before = len(status_errors)
+        inv.base.args["inverter_mode"] = "Eco"
+        inv.adjust_inverter_mode(False)
+        if warnings("is the fixed value Eco") != 1 or len(status_errors) != errors_before + 1:
+            print("ERROR: expected a fixed-value warning and status error for inverter_mode Eco: {} {}".format(log_messages, status_errors))
+            failed = True
+
+        # YAML "inverter_mode: off" arrives as False - a fixed value too, not a missing entity
+        errors_before = len(status_errors)
+        inv.base.args["inverter_mode"] = False
+        inv.adjust_inverter_mode(True)
+        if warnings("is the fixed value False") != 1 or len(status_errors) != errors_before + 1:
+            print("ERROR: expected a fixed-value warning and status error for inverter_mode False: {} {}".format(log_messages, status_errors))
+            failed = True
+
+        # An integration's sensor is not a switch either: refused rather than overwritten with set_state
+        errors_before = len(status_errors)
+        inv.base.args["inverter_mode"] = "sensor.givtcp_mode"
+        ha.dummy_items["sensor.givtcp_mode"] = "Eco"
+        inv.adjust_inverter_mode(True)
+        if ha.get_state("sensor.givtcp_mode") != "Eco" or warnings("sensor.givtcp_mode is not a switch") != 1 or len(status_errors) != errors_before + 1:
+            print("ERROR: a sensor bound as the eco toggle should be refused with a status error, not written: state {} logs {}".format(ha.get_state("sensor.givtcp_mode"), log_messages))
+            failed = True
+
+        # None of the refused bindings - missing, select, fixed values, sensor - got as far as a write
+        if switch_writes:
+            print("ERROR: a refused eco toggle binding was written: {}".format(switch_writes))
+            failed = True
+
+        # An input_boolean standing in for the switch is written like one, with no warning or status error
+        warnings_before = sum(1 for msg in log_messages if msg.startswith("Warn:"))
+        errors_before = len(status_errors)
+        inv.base.args["inverter_mode"] = "input_boolean.eco_mode"
+        ha.dummy_items["input_boolean.eco_mode"] = "on"
+        inv.adjust_inverter_mode(True)
+        if ha.get_state("input_boolean.eco_mode") != "off":
+            print("ERROR: an input_boolean eco toggle should have been turned off for export, got {}".format(ha.get_state("input_boolean.eco_mode")))
+            failed = True
+        if sum(1 for msg in log_messages if msg.startswith("Warn:")) != warnings_before or len(status_errors) != errors_before:
+            print("ERROR: a working input_boolean eco toggle should raise no warning or status error: {} {}".format(log_messages[-3:], status_errors[errors_before:]))
+            failed = True
+
+        # A select fixed with a working toggle and then bound again is warned about again
+        inv.base.args["inverter_mode"] = "select.givtcp_mode"
+        inv.adjust_inverter_mode(False)
+        if warnings("select.givtcp_mode is not a switch") != 2:
+            print("ERROR: a select coming back after a working toggle should be warned about again, got {}".format(warnings("select.givtcp_mode is not a switch")))
+            failed = True
+
+        # Missing, then fixed with a real switch, then missing again: the fix resets the warning, so the same
+        # problem coming back is said again
+        inv.base.args.pop("inverter_mode", None)
+        inv.adjust_inverter_mode(False)
+        missing_warnings = warnings("No entity_id for ECO Toggle")
+        inv.base.args["inverter_mode"] = "switch.enable_eco_mode"
+        ha.dummy_items["switch.enable_eco_mode"] = "off"
+        inv.adjust_inverter_mode(False)
+        if ha.get_state("switch.enable_eco_mode") != "on":
+            print("ERROR: the eco switch should have been turned on, got {}".format(ha.get_state("switch.enable_eco_mode")))
+            failed = True
+        # A working switch still waits for a moved export window to settle before writing
+        del sleeps[:]
+        errors_before = len(status_errors)
+        inv.adjust_inverter_mode(True, changed_start_end=True)
+        if len(status_errors) != errors_before:
+            print("ERROR: a working eco switch should raise no status error: {}".format(status_errors[errors_before:]))
+            failed = True
+        if sleeps.count(30) != 1 or ha.get_state("switch.enable_eco_mode") != "off":
+            print("ERROR: a working eco switch should sleep 30s on a window change then write, slept {} state {}".format(sleeps, ha.get_state("switch.enable_eco_mode")))
+            failed = True
+        inv.base.args.pop("inverter_mode", None)
+        inv.adjust_inverter_mode(False)
+        if warnings("No entity_id for ECO Toggle") != missing_warnings + 1:
+            print("ERROR: a missing switch after a working one should be warned about again, got {} then {}".format(missing_warnings, warnings("No entity_id for ECO Toggle")))
+            failed = True
+    except Exception:
+        import traceback
+
+        print("ERROR: the eco toggle test raised:")
+        traceback.print_exc()
+        failed = True
+    finally:
+        inv.__dict__.clear()
+        inv.__dict__.update(orig_inv_state)
+        inv.base.args.clear()
+        inv.base.args.update(orig_args)
+        inv.base.log = orig_log
+        inv.base.record_status = orig_record_status
+        ha.dummy_items.clear()
+        ha.dummy_items.update(orig_dummy_items)
+
+    return failed
+
+
 def test_adjust_ge_eco_toggle_missing_entity(test_name, inv, force_export, inverter_mode_arg, expect_warning):
     """
     Test GE eco-toggle adjust_inverter_mode when inverter_mode entity is missing.
 
     inverter_mode_arg:
       - "unset": remove inverter_mode from args (expect warning)
-      - None: explicitly set inverter_mode to None (expect no warning)
+      - None: inverter_mode set but empty for this inverter, as GE Cloud leaves a 3-phase unit or one that
+        exports at full power in eco mode (expect no warning)
     """
     failed = False
     print("Test: {} force_export={}".format(test_name, force_export))
@@ -1937,6 +2263,7 @@ def test_adjust_ge_eco_toggle_missing_entity(test_name, inv, force_export, inver
 
     inv.inv_has_ge_eco_toggle = True
     inv.inv_has_ge_inverter_mode = False
+    inv.eco_toggle_warned = None
     inv.rest_data = None
     inv.rest_api = None
     if inverter_mode_arg == "unset":
@@ -1957,6 +2284,7 @@ def test_adjust_ge_eco_toggle_missing_entity(test_name, inv, force_export, inver
 
     inv.inv_has_ge_eco_toggle = orig_has_ge_eco_toggle
     inv.inv_has_ge_inverter_mode = orig_has_ge_inverter_mode
+    inv.eco_toggle_warned = None
     inv.base.log = orig_log
     inv.log = orig_inv_log
     if orig_has_inverter_mode_arg:
@@ -6285,6 +6613,7 @@ def run_inverter_tests(my_predbat_dummy):
     # is then what keeps the battery from charging
     discharge_to_target = lambda inv: inv.adjust_battery_target(0, isCharging=True, isExporting=False)
     failed |= test_solis_energy_control("solis_gs_discharge_to_target", my_predbat, ha, "GS", "Self-Use", discharge_to_target, "Self-Use - No Timed Charge/Discharge")
+    failed |= test_solis_gs_current_hold(my_predbat, ha)
     if failed:
         return failed
 
@@ -6359,6 +6688,7 @@ def run_inverter_tests(my_predbat_dummy):
     failed |= test_adjust_ge_eco_toggle_missing_entity("eco_toggle_missing_entity_unset_export", inv, True, "unset", True)
     failed |= test_adjust_ge_eco_toggle_missing_entity("eco_toggle_missing_entity_none_enable", inv, False, None, False)
     failed |= test_adjust_ge_eco_toggle_missing_entity("eco_toggle_missing_entity_none_export", inv, True, None, False)
+    failed |= test_adjust_ge_eco_toggle_warns_once(ha, inv)
     failed |= test_fox_no_predbat_inverter_mode_control("fox_no_predbat_inverter_mode_control", my_predbat)
     if failed:
         return failed

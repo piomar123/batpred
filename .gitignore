@@ -125,3 +125,10 @@ apps/predbat/git_version.txt
 
 # Claude Code local worktrees
 .claude/worktrees/
+
+# Memory benchmark: the local fixture (household data, never committed) and run output
+coverage/memory_benchmark_data/
+coverage/memory_benchmark_runs/
+# LoadML training benchmark: its local fixture (household data, never committed) and run output
+coverage/load_ml_benchmark_data/
+coverage/load_ml_benchmark_runs/
