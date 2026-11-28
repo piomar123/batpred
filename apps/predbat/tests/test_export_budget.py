@@ -738,6 +738,63 @@ def test_measured_floor(my_predbat):
     return failed
 
 
+def test_measured_floor_follows_soc(my_predbat):
+    """The measured floor is undone before the next cycle, so it can fall as the battery runs the house, and the plan keeps its own target"""
+    from const import EXPORT_MODE_TARGET
+    from utils import pack_export_limit, export_target_of
+
+    failed = False
+    minutes_now = FIXTURE_MINUTES_NOW
+    my_predbat.minutes_now = minutes_now
+    my_predbat.soc_max = 10.0
+    my_predbat.battery_loss_discharge = 1.0
+    my_predbat.inverter_loss = 1.0
+    my_predbat.export_budget_mode = 1
+    my_predbat.export_budget_floor_applied = {}
+    plan_limit = pack_export_limit(EXPORT_MODE_TARGET, 10, 1.0)
+    my_predbat.export_window_best = [
+        {"start": minutes_now - 30, "end": minutes_now + 30, "average": 50.0, "target": 10.0},
+        {"start": minutes_now + 120, "end": minutes_now + 150, "average": 50.0, "target": 10.0},
+    ]
+    my_predbat.export_limits_best = [plan_limit, plan_limit]
+
+    # Cycle 1: 5 kWh stored, 20% PV -> 1 kWh exportable -> floor 40%
+    my_predbat.soc_kw = 5.0
+    my_predbat.export_budget_seed = (0.0, 0.2)
+    my_predbat.restore_export_budget_floor()
+    my_predbat.apply_export_budget_floor()
+    if export_target_of(my_predbat.export_limits_best[0]) != 40:
+        print("ERROR: export_budget floor cycle 1 gave {} expected 40".format(export_target_of(my_predbat.export_limits_best[0])))
+        failed = True
+
+    # Cycle 2: the house drew the battery down to 4 kWh, still 20% PV -> 0.8 kWh exportable -> floor 32%, not the stale 40%
+    my_predbat.soc_kw = 4.0
+    my_predbat.restore_export_budget_floor()
+    if my_predbat.export_limits_best[0] != plan_limit or my_predbat.export_window_best[0]["target"] != 10.0:
+        print("ERROR: export_budget floor restore gave {} target {} expected the plan's {} target 10".format(my_predbat.export_limits_best[0], my_predbat.export_window_best[0]["target"], plan_limit))
+        failed = True
+    my_predbat.apply_export_budget_floor()
+    if export_target_of(my_predbat.export_limits_best[0]) != 32 or my_predbat.export_window_best[0]["target"] != 32:
+        print("ERROR: export_budget floor cycle 2 gave {} (window {}) expected 32".format(export_target_of(my_predbat.export_limits_best[0]), my_predbat.export_window_best[0]["target"]))
+        failed = True
+    if my_predbat.export_limits_best[1] != plan_limit:
+        print("ERROR: export_budget floor changed a later window: {}".format(my_predbat.export_limits_best[1]))
+        failed = True
+
+    # A recompute that replaced the floored limit keeps its own one
+    new_limit = pack_export_limit(EXPORT_MODE_TARGET, 60, 1.0)
+    my_predbat.export_limits_best[0] = new_limit
+    my_predbat.export_window_best[0]["target"] = 60.0
+    my_predbat.restore_export_budget_floor()
+    if my_predbat.export_limits_best[0] != new_limit or my_predbat.export_window_best[0]["target"] != 60.0 or my_predbat.export_budget_floor_applied:
+        print("ERROR: export_budget floor restore overwrote a recomputed limit: {} target {}".format(my_predbat.export_limits_best[0], my_predbat.export_window_best[0]["target"]))
+        failed = True
+
+    my_predbat.export_budget_mode = 0
+    my_predbat.export_budget_seed = None
+    return failed
+
+
 def test_cap_seed_consumers(my_predbat):
     """With a cap below the stored PV, the sensor and the measured export floor use the capped PV part"""
     from const import EXPORT_MODE_TARGET
@@ -864,6 +921,7 @@ def run_export_budget_tests(my_predbat):
                 "battery_loss_discharge",
                 "inverter_loss",
                 "predict_export_budget",
+                "export_budget_floor_applied",
             )
         }
         try:
@@ -873,6 +931,7 @@ def run_export_budget_tests(my_predbat):
             failed |= test_seed_hook_measured_soc(my_predbat)
             failed |= test_publish_sensor(my_predbat)
             failed |= test_measured_floor(my_predbat)
+            failed |= test_measured_floor_follows_soc(my_predbat)
             failed |= test_cap_seed_consumers(my_predbat)
         finally:
             for attr, value in saved.items():

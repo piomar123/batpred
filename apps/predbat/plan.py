@@ -2315,6 +2315,10 @@ class Plan:
         # optimise_charge_limit() reads it from here rather than every call working it out
         self.charge_keep_target = calc_percent_limit(self.isCharging_Target, self.soc_max) if self.isCharging else None
 
+        # Export energy budget: put back the plan's own export targets before anything keeps, compares or saves the
+        # plan; apply_export_budget_floor below measures this cycle's floor afresh
+        self.restore_export_budget_floor()
+
         # Re-compute plan due to time wrap
         if self.plan_last_updated_minutes > self.minutes_now:
             self.log("Force recompute due to start of day")
@@ -4235,6 +4239,32 @@ class Plan:
                 window["target"] = 0
         return charge_window_best, charge_limit_best
 
+    def restore_export_budget_floor(self):
+        """Undo the measured export budget floor of the last cycle, giving each raised window back the plan's own target.
+
+        The floor only ever raises a target, so left in the plan it could not follow the SoC down as the battery ran the
+        house: the next cycle's lower floor found the old one in place, and a recompute that kept the previous plan kept
+        it too. The export then sat in freeze above the floor the budget allowed (2026-11-28: held at 88% from 10:20 to
+        10:40 while the SoC fell from 89% to 76% and the floor measured from 84% to 75%). A window a recompute replaced
+        keeps its new limit, since only a limit equal to the one the floor wrote is restored.
+        """
+        applied = self.export_budget_floor_applied
+        self.export_budget_floor_applied = {}
+        if not applied:
+            return
+        for window_n, window in enumerate(self.export_window_best):
+            entry = applied.get((window["start"], window["end"]))
+            if entry is None or window_n >= len(self.export_limits_best):
+                continue
+            plan_limit, plan_target, floor_limit = entry
+            if self.export_limits_best[window_n] != floor_limit:
+                continue
+            self.export_limits_best[window_n] = plan_limit
+            if plan_target is None:
+                window.pop("target", None)
+            else:
+                window["target"] = plan_target
+
     def apply_export_budget_floor(self):
         """Hold export windows running now, or starting before the next cycle, at or above the measured SoC minus the
         energy the export budget allows now (seeded from history every cycle). The inverter force exports at full power
@@ -4255,8 +4285,10 @@ class Plan:
             if window["start"] >= self.minutes_now + RUN_EVERY or window["end"] <= self.minutes_now or export_mode_of(limit) != EXPORT_MODE_TARGET:
                 continue
             if (export_target_of(limit) or 0) < floor_percent:
+                plan_target = window.get("target")
                 self.export_limits_best[window_n] = pack_export_limit(EXPORT_MODE_TARGET, floor_percent, export_power_of(limit))
                 window["target"] = max(window.get("target", 0), float(floor_percent))
+                self.export_budget_floor_applied[(window["start"], window["end"])] = (limit, plan_target, self.export_limits_best[window_n])
                 self.log("Export energy budget: export {} - {} target raised to {}% (SoC {} kWh, exportable {} kWh)".format(self.time_abs_str(window["start"]), self.time_abs_str(window["end"]), floor_percent, dp2(self.soc_kw), dp2(exportable)))
 
     def clip_export_slots(self, minutes_now, predict_soc, export_window_best, export_limits_best, record_export_windows, step, budget_exportable=None):

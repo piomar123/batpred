@@ -840,6 +840,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.export_budget_mode = 0
         self.export_budget_cap_kwh = 0.0
         self.export_budget_seed = None
+        # {(window start, window end): (plan limit, plan window target, limit the floor wrote)}, see restore_export_budget_floor
+        self.export_budget_floor_applied = {}
         self.export_budget_noncompliant_kwh = 0.0
         self.export_budget_replay_steps = 0
         self.export_budget_planned_battery_export = 0.0
