@@ -3633,6 +3633,24 @@ def run_execute_tests(my_predbat):
     if failed:
         return failed
 
+    # A day-long window that has not started yet: the "avoid wrap" guard only moves a start already in the past, so
+    # here the cap alone keeps the written start and end clock times apart
+    failed |= run_execute_test(
+        my_predbat,
+        "charge_window_exactly_one_day_future",
+        charge_window_best=[{"start": 12 * 60 + 30, "end": 12 * 60 + 30 + 24 * 60, "average": 1}],
+        charge_limit_best=charge_limit_best,
+        set_charge_window=True,
+        set_export_window=True,
+        minutes_now=12 * 60,
+        assert_charge_time_enable=True,
+        assert_status="Demand",
+        assert_charge_start_time_minutes=12 * 60 + 30,
+        assert_charge_end_time_minutes=12 * 60 + 30 + 24 * 60 - 1,
+    )
+    if failed:
+        return failed
+
     # Reproduce an EMS which still holds yesterday's 23:30 start after midnight.
     # A capable inverter keeps the overnight window; a same-day device starts at 00:00.
     for can_span_midnight in [False, True]:
@@ -5171,6 +5189,24 @@ def run_execute_tests(my_predbat):
         assert_discharge_end_time_minutes=12 * 60 + 24 * 60 - 2,
     )
     my_predbat.inverter_clock_skew_discharge_end = 0
+    if failed:
+        return failed
+
+    # As for charge: a day-long export window that has not started yet is kept short of a day by the cap alone
+    failed |= run_execute_test(
+        my_predbat,
+        "export_window_exactly_one_day_future",
+        export_window_best=[{"start": 12 * 60 + 30, "end": 12 * 60 + 30 + 24 * 60, "average": 1}],
+        export_limits_best=export_limits_best,
+        assert_force_export=True,
+        set_charge_window=True,
+        set_export_window=True,
+        soc_kw=10,
+        minutes_now=12 * 60,
+        inverter_discharge_time_minutes_start=-1,
+        assert_discharge_start_time_minutes=12 * 60 + 30,
+        assert_discharge_end_time_minutes=12 * 60 + 30 + 24 * 60 - 1,
+    )
     if failed:
         return failed
 
